@@ -45,6 +45,8 @@ namespace sql
       UNUSED(order_item);
       return common::OB_SUCCESS;
     }
+  private:
+    int try_replace_file_sql_describe(ObDMLStmt *child, bool &replaced);
   };
 
 }

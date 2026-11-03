@@ -1495,6 +1495,7 @@ SQL_UNITY_GROUPS = [
             "src/sql/resolver/dml/ob_delete_resolver.cpp",
             "src/sql/resolver/dml/ob_delete_stmt.cpp",
             "src/sql/resolver/dml/ob_dml_resolver.cpp",
+            "src/sql/resolver/dml/ob_file_sql_table.cpp",
             "src/sql/resolver/dml/ob_dml_stmt.cpp",
             "src/sql/resolver/dml/ob_group_by_checker.cpp",
             "src/sql/resolver/dml/ob_insert_resolver.cpp",

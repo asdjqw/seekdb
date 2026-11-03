@@ -196,6 +196,10 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
              OB_FAIL(deep_copy_values_table_def(*other.values_table_def_, expr_copier, allocator))) {
   } else { /* do nothing */ }
   if (OB_SUCC(ret)) {
+    is_file_sql_table_ = other.is_file_sql_table_;
+    file_sql_meta_ = other.file_sql_meta_;
+  }
+  if (OB_SUCC(ret)) {
     if (OB_ISNULL(other.sample_info_)) {
       // do nothing
     } else {

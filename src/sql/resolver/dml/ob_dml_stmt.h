@@ -156,6 +156,8 @@ struct TableItem
     table_type_ = MAX_TABLE_TYPE;
     values_table_def_ = NULL;
     sample_info_ = nullptr;
+    is_file_sql_table_ = false;
+    file_sql_meta_ = nullptr;
   }
 
   virtual TO_STRING_KV(N_TID, table_id_,
@@ -305,6 +307,9 @@ struct TableItem
   ObValuesTableDef *values_table_def_;
   // sample scan infos
   SampleInfo *sample_info_;
+  // Materialized read_csv/read_json/read_parquet/glob table.
+  bool is_file_sql_table_;
+  struct ObFileSqlMeta *file_sql_meta_;
 };
 
 struct ColumnItem

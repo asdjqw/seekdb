@@ -336,6 +336,7 @@ END_P SET_VAR DELIMITER
         REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
+        READ_CSV READ_JSON READ_PARQUET GLOB
         RANK READ_ONLY RECOVERY REJECT ROLE
 
         SAMPLE SAVEPOINT SCALARS SCHEMA_NAME SCN SCOPE SCORE SECOND SECURITY SEED
@@ -372,7 +373,7 @@ END_P SET_VAR DELIMITER
         ORGANIZATION
 //-----------------------------non_reserved keyword end---------------------------------------------
 %type <node> sql_stmt stmt_list stmt opt_end_p
-%type <node> select_stmt update_stmt delete_stmt
+%type <node> select_stmt update_stmt delete_stmt copy_stmt
 %type <node> insert_stmt single_table_insert values_clause dml_table_name
 %type <node> create_table_stmt create_table_like_stmt fork_table_stmt fork_database_stmt diff_table_stmt merge_table_stmt opt_table_option_list table_option_list table_option table_option_list_space_seperated parallel_option lob_storage_clause lob_storage_parameter lob_storage_parameters lob_chunk_size
 %type <node> index_or_heap
@@ -497,7 +498,7 @@ END_P SET_VAR DELIMITER
 %type <node> dynamic_sampling_hint
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
-%type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
+%type <node> json_table_expr file_sql_table_expr opt_file_sql_options file_sql_option_list file_sql_option opt_file_sql_alias copy_option_list copy_option unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
 %type <node> table_values_clause table_values_clause_with_order_by_and_limit values_row_list row_value
@@ -582,6 +583,7 @@ stmt:
   | drop_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | drop_view_stmt          { $$ = $1; check_question_mark($$, result); }
   | explain_stmt            { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; check_question_mark($$, result); }
   | create_outline_stmt     { $$ = $1; question_mark_issue($$, result); }
   | alter_outline_stmt      { $$ = $1; question_mark_issue($$, result); }
   | drop_outline_stmt       { $$ = $1; check_question_mark($$, result); }
@@ -10835,6 +10837,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_sql_table_expr
+{
+  $$ = $1;
+}
 | '(' table_references ')'
 {
   $$ = $2;
@@ -16623,6 +16629,103 @@ DAY
 *
 *  JSON TABLE
 *============================================================*/
+
+opt_file_sql_options:
+/* EMPTY */
+{ $$ = NULL; }
+| ',' file_sql_option_list
+{
+  merge_nodes($$, result, T_EXPR_LIST, $2);
+}
+;
+
+file_sql_option_list:
+file_sql_option
+{ $$ = $1; }
+| file_sql_option_list ',' file_sql_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_sql_option:
+column_name COMP_EQ simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 2, $1, $3);
+}
+;
+
+opt_file_sql_alias:
+/* EMPTY */
+{ $$ = NULL; }
+| relation_name
+{ $$ = $1; }
+| AS relation_name
+{ $$ = $2; }
+;
+
+file_sql_table_expr:
+READ_CSV '(' simple_expr opt_file_sql_options ')' opt_file_sql_alias
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, $3, $4, $6);
+  $$->value_ = 0;
+}
+| READ_JSON '(' simple_expr opt_file_sql_options ')' opt_file_sql_alias
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, $3, $4, $6);
+  $$->value_ = 1;
+}
+| READ_PARQUET '(' simple_expr opt_file_sql_options ')' opt_file_sql_alias
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, $3, $4, $6);
+  $$->value_ = 2;
+}
+| GLOB '(' simple_expr opt_file_sql_options ')' opt_file_sql_alias
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, $3, $4, $6);
+  $$->value_ = 3;
+}
+;
+
+copy_option:
+column_name relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 2, $1, $2);
+  $$->value_ = 1;
+}
+| column_name STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 2, $1, $2);
+  $$->value_ = 2;
+}
+| column_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 1, $1);
+  $$->value_ = 4;
+}
+;
+
+copy_option_list:
+copy_option
+{ $$ = $1; }
+| copy_option_list ',' copy_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE '(' copy_option_list ')'
+{
+  ParseNode *opts = NULL;
+  merge_nodes(opts, result, T_EXPR_LIST, $8);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_FILE_SQL, 3, $3, $6, opts);
+}
+| COPY '(' select_stmt ')' TO STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_FILE_SQL, 3, $3, $6, NULL);
+}
+;
 
 json_table_expr:
 JSON_TABLE '(' simple_expr ',' literal mock_jt_on_error_on_empty COLUMNS '(' jt_column_list ')' ')' relation_name
