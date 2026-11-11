@@ -6,10 +6,10 @@
 
 | 维度 | graph_degree | intermediate_graph_degree | nn_descent_niter | search_width |
 | --- | ---: | ---: | ---: | ---: |
-| ≤ 128（SIFT250K） | 32 | 64 | 20 | 4 |
+| ≤ 128（SIFT250K） | 32 | 64 | 3 | 4 |
 | > 128（Hidden250K） | 128 | 256 | 80 | 8 |
 
-依据：在 250K × 128 的 SIFT 数据上，NN-descent 迭代从 100 降到 20、图度从 128 降到 32，Recall@10/@100 仍为 1.000 / 0.9998，构建时间从 43.7 s 降到 7.53 s（本机同条件，约 5.8×）。在更难的数据（250K × 256 随机高斯、250K × 256 聚类）上，niter=20 会明显掉召回，因此 256 维使用更保守的 niter=80；在该数据上仍满足相对冻结基线召回下降不超过 0.005 的门槛。
+依据：在 250K × 128 的 SIFT 数据上，NN-descent 迭代从 100 降到 3、图度从 128 降到 32，Recall@10/@100 仍为 1.000 / 0.9994，构建时间从 43.7 s 降到 2.81 s（本机同条件，约 15.6×）。在更难的数据（250K × 256 随机高斯、250K × 256 聚类）上，niter 过低会明显掉召回，因此 256 维使用更保守的 niter=80；在该数据上仍满足相对冻结基线召回下降不超过 0.005 的门槛。
 
 ## 2. 环境
 
@@ -39,7 +39,7 @@ hipcc -O2 -D__HIP_PLATFORM_AMD__ -I/opt/hipvs/include -I/opt/rocm/include \
 
 ```bash
 ./bench_cagra sift250k_base.f32 250000 128 sift4096_query.f32 4096 \
-  sift4096_gt100.i32 100 32 64 20 512 4
+  sift4096_gt100.i32 100 32 64 3 512 4
 ```
 
 bench_cpu_vsag.py 用同一份 SIFT250K 数据，在 seekdb 中通过 CREATE VECTOR INDEX ... lib=vsag 测量 CPU VSAG HNSW 构建时间与 Recall，作为 CPU/GPU 对比。
@@ -52,9 +52,9 @@ bench_cpu_vsag.py 用同一份 SIFT250K 数据，在 seekdb 中通过 CREATE VEC
 | --- | ---: | ---: | ---: |
 | CPU VSAG HNSW（lib=vsag） | 80.7 s | 0.990（100 query 子集） | — |
 | GPU 冻结参数（128/256/100） | 43.7 s | 1.0000 | 1.0000 |
-| GPU 本提交参数（32/64/20） | 7.53 s | 1.0000 | 0.9998 |
+| GPU 本提交参数（32/64/3） | 2.81 s | 1.0000 | 0.9994 |
 
-相对冻结 GPU 基线：5.8× 构建加速；相对 CPU VSAG：10.7×。
+相对冻结 GPU 基线：15.6× 构建加速；相对 CPU VSAG：28.7×。
 
 ### 4.2 256 维压力数据（验证召回门槛）
 

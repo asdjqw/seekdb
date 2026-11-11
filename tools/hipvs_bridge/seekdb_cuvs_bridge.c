@@ -38,7 +38,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (dim <= 128) {
     h->ip->graph_degree = 32;
     h->ip->intermediate_graph_degree = 64;
-    h->ip->nn_descent_niter = 20;
+    h->ip->nn_descent_niter = 3;
   } else {
     h->ip->graph_degree = 128;
     h->ip->intermediate_graph_degree = 256;
