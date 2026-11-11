@@ -20,7 +20,7 @@
 
 ## 3. 测量方法
 
-bench_cagra.c 直接调用 hipVS 的 CAGRA C API，与 bridge 使用完全相同的 cuvsResourcesCreate / cuvsCagraBuild / cuvsCagraSearch 调用路径：
+bench_cagra.c（本目录）直接调用 hipVS 的 CAGRA C API，与 bridge 使用完全相同的 cuvsResourcesCreate / cuvsCagraBuild / cuvsCagraSearch 调用路径：
 
 1. 读入 base、query、ground truth；
 2. 计时 cuvsResourcesCreate + cuvsCagraIndexParamsCreate + cuvsCagraBuild（含 cuVS 内部 H2D）；
@@ -70,7 +70,7 @@ bench_cpu_vsag.py 用同一份 SIFT250K 数据，在 seekdb 中通过 CREATE VEC
 ## 5. 复现与提交
 
 - 代码：tools/hipvs_bridge/seekdb_cuvs_bridge.c
-- 基准：tools/hipvs_bridge/bench_cagra.c、tools/hipvs_bridge/bench_cpu_vsag.py
+- 基准：docs/gpu-vector-index-hipvs-cuvs/bench/bench_cagra.c、docs/gpu-vector-index-hipvs-cuvs/bench/bench_cpu_vsag.py
 - 构建 bridge：tools/hipvs_bridge/build.sh /path/to/libseekdb_cuvs_bridge.so
 - 构建 seekdb：
 
