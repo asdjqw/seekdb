@@ -36,8 +36,8 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   /* Dimension-aware CAGRA build: SIFT-class (<=128d) keeps full recall with a
    * much cheaper NN-descent budget, while 256d datasets use a safer budget. */
   if (dim <= 128) {
-    h->ip->graph_degree = 64;
-    h->ip->intermediate_graph_degree = 128;
+    h->ip->graph_degree = 32;
+    h->ip->intermediate_graph_degree = 64;
     h->ip->nn_descent_niter = 20;
   } else {
     h->ip->graph_degree = 128;
