@@ -78,7 +78,8 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     {
       size_t required_itopk = (size_t)topk * 4;
       if (h->dim <= 128) {
-        if (topk <= 10) required_itopk = 256;
+        if (topk <= 10) required_itopk = 128;
+        else if (topk >= 100) required_itopk = 256;
         if (required_itopk < 64) required_itopk = 64;
       } else if (required_itopk < 512) {
         required_itopk = 512;
