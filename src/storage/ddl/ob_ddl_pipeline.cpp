@@ -962,24 +962,107 @@ int ObHNSWIndexAppendBufferOperator::append_row(
 int ObHNSWIndexAppendBufferOperator::append_row_file(ObDDLRowFile *row_file, ObDDLTabletContext *tablet_context)
 {
   int ret = OB_SUCCESS;
-  ObBatchDatumRows *datum_rows = nullptr;
-  if (OB_ISNULL(row_file) || OB_ISNULL(tablet_context)) {
+  const bool can_batch = 0 == extra_column_idx_types_.count() && vec_dim_ > 0 &&
+                         vector_col_idx_ >= 0 && vector_vid_col_idx_ >= 0;
+  if (OB_ISNULL(row_file) || OB_ISNULL(tablet_context) || OB_ISNULL(tablet_context->vector_index_ctx_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), KP(row_file), KP(tablet_context));
-  }
-  while (OB_SUCC(ret)) {
-    if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
-      if (OB_ITER_END == ret) {
-        ret = OB_SUCCESS;
-        break;
+  } else if (!can_batch) {
+    ObBatchDatumRows *datum_rows = nullptr;
+    while (OB_SUCC(ret)) {
+      if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
+        if (OB_ITER_END == ret) {
+          ret = OB_SUCCESS;
+          break;
+        } else {
+          LOG_WARN("get next batch failed", K(ret));
+        }
       } else {
-        LOG_WARN("get next batch failed", K(ret));
+        const ObArray<common::ObIVector *> &vectors = datum_rows->vectors_;
+        const int64_t total_row_count = datum_rows->row_count_;
+        for (int64_t i = 0; OB_SUCC(ret) && i < total_row_count; ++i) {
+          if (OB_FAIL(append_row(i, vectors, tablet_context))) {
+          }
+        }
       }
+    }
+  } else {
+    // Batch the offline-DDL row stream before it reaches the vector index.
+    // Calling add_snap_index once per row makes the DDL CPU path dominate the
+    // CAGRA build, so accumulate whole row-file batches and submit them in
+    // groups. This is the same public adaptor API used by append_row, only
+    // with a larger row count per call.
+    const int64_t DDL_VEC_BATCH = 1024;
+    ObIVectorIndexRuntime *vec_index_service =
+        ::oceanbase::share::server_service<::oceanbase::storage::ObIVectorIndexRuntime>();
+    ObPluginVectorIndexAdapterGuard adaptor_guard;
+    if (OB_ISNULL(vec_index_service)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("error unexpected, vector index service is nullptr", K(ret));
+    } else if (OB_FAIL(vec_index_service->acquire_adapter_guard(
+                   tablet_id_, ObIndexType::INDEX_TYPE_VEC_INDEX_SNAPSHOT_DATA_LOCAL,
+                   adaptor_guard, &tablet_context->vector_index_ctx_->vec_idx_param_,
+                   tablet_context->vector_index_ctx_->vec_dim_))) {
+    } else if (OB_ISNULL(adaptor_guard.get_adatper())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("error unexpected, vector adaptor is nullptr", K(ret));
     } else {
-      const ObArray<common::ObIVector *> &vectors = datum_rows->vectors_;
-      const int64_t total_row_count = datum_rows->row_count_;
-      for (int64_t i = 0; OB_SUCC(ret) && i < total_row_count; ++i) {
-        if (OB_FAIL(append_row(i, vectors, tablet_context))) {
+      ObArenaAllocator batch_alloc("VecDdlBatch", OB_MALLOC_NORMAL_BLOCK_SIZE);
+      float *vec_buf = static_cast<float *>(batch_alloc.alloc(sizeof(float) * vec_dim_ * DDL_VEC_BATCH));
+      int64_t *vid_buf = static_cast<int64_t *>(batch_alloc.alloc(sizeof(int64_t) * DDL_VEC_BATCH));
+      if (OB_ISNULL(vec_buf) || OB_ISNULL(vid_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to allocate DDL vector batch", K(ret), K(vec_dim_));
+      } else {
+        ObBatchDatumRows *datum_rows = nullptr;
+        int64_t batched = 0;
+        while (OB_SUCC(ret)) {
+          if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
+            if (OB_ITER_END == ret) {
+              ret = OB_SUCCESS;
+              break;
+            } else {
+              LOG_WARN("get next batch failed", K(ret));
+            }
+          } else if (OB_ISNULL(datum_rows)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("null datum rows", K(ret));
+          } else {
+            const ObArray<common::ObIVector *> &vectors = datum_rows->vectors_;
+            const int64_t total_row_count = datum_rows->row_count_;
+            for (int64_t i = 0; OB_SUCC(ret) && i < total_row_count; ++i) {
+              row_allocator_.reuse();
+              if (vectors.at(vector_col_idx_)->is_null(i)) {
+                continue;
+              }
+              ObString vec_str = vectors.at(vector_col_idx_)->get_string(i);
+              if (OB_FAIL(read_full_lob_string(row_allocator_, ObLongTextType, CS_TYPE_BINARY, true, vec_str))) {
+                LOG_WARN("failed to read vector lob", K(ret));
+              } else if (vec_str.length() == 0) {
+                continue;
+              } else if (vec_str.length() != vec_dim_ * static_cast<int64_t>(sizeof(float))) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("unexpected vector length", K(ret), K(vec_str.length()), K(vec_dim_));
+              } else {
+                MEMCPY(reinterpret_cast<char *>(vec_buf) + batched * vec_dim_ * sizeof(float),
+                       vec_str.ptr(), vec_dim_ * sizeof(float));
+                vid_buf[batched] = vectors.at(vector_vid_col_idx_)->get_int(i);
+                ++batched;
+                if (batched == DDL_VEC_BATCH) {
+                  if (OB_FAIL(adaptor_guard.get_adatper()->add_snap_index(
+                                 vec_buf, vid_buf, nullptr, 0, static_cast<int>(batched)))) {
+                  } else {
+                    batched = 0;
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret) && batched > 0) {
+          if (OB_FAIL(adaptor_guard.get_adatper()->add_snap_index(
+                         vec_buf, vid_buf, nullptr, 0, static_cast<int>(batched)))) {
+          }
         }
       }
     }
