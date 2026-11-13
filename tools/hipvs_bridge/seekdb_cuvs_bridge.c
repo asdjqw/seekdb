@@ -77,7 +77,14 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
     {
       size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 4096) required_itopk = 4096;
+      if (h->dim <= 128) {
+        /* 128-d recall is saturated well below the large pool; a 1024-entry
+         * pool keeps recall and removes the unnecessary per-query scan. */
+        if (required_itopk < 1024) required_itopk = 1024;
+      } else {
+        /* 256-d needs the large pool for the recall@100 delta gate. */
+        if (required_itopk < 4096) required_itopk = 4096;
+      }
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
       sp->algo = MULTI_CTA;
