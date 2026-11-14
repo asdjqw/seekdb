@@ -95,20 +95,33 @@ int ObUUIDNode::init()
   addresses = (IP_ADAPTER_ADDRESSES *)malloc(buf_len);
   if (OB_ISNULL(addresses)) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &buf_len) == NO_ERROR) {
-    for (PIP_ADAPTER_ADDRESSES addr = addresses; addr && !mac_addr_found; addr = addr->Next) {
-      if (addr->PhysicalAddressLength == 6 && addr->IfType != IF_TYPE_SOFTWARE_LOOPBACK) {
-        MEMCPY(mac_addr_, addr->PhysicalAddress, 6);
-        mac_addr_found = true;
+  } else {
+    if (GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &buf_len) == NO_ERROR) {
+      for (PIP_ADAPTER_ADDRESSES addr = addresses; addr && !mac_addr_found; addr = addr->Next) {
+        if (addr->PhysicalAddressLength == 6 && addr->IfType != IF_TYPE_SOFTWARE_LOOPBACK) {
+          MEMCPY(mac_addr_, addr->PhysicalAddress, 6);
+          mac_addr_found = true;
+        }
       }
     }
     if (!mac_addr_found) {
-      ret = OB_ERR_UNEXPECTED;
-    } else {
-      is_inited_ = true;
+      // RFC 4122 section 4.5: no usable physical adapter (VM/container or
+      // winsock not initialized) must not stop the server; derive a random
+      // node id instead of failing initialization.
+      uint64_t seed = GetTickCount64() ^ static_cast<uint64_t>(GetCurrentThreadId())
+                      ^ reinterpret_cast<uint64_t>(&ret);
+      for (int i = 0; i < 6; ++i) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        mac_addr_[i] = static_cast<unsigned char>((seed >> 33) & 0xFF);
+      }
+      mac_addr_[0] |= 0x01;
+      mac_addr_found = true;
     }
-  } else {
-    ret = OB_ERR_UNEXPECTED;
+    if (mac_addr_found) {
+      is_inited_ = true;
+    } else {
+      ret = OB_ERR_UNEXPECTED;
+    }
   }
   if (addresses) { free(addresses); }
 #elif defined(__APPLE__)

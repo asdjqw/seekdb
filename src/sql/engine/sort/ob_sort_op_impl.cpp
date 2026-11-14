@@ -356,7 +356,9 @@ int ObSortOpImpl::ObAdaptiveQS::compare_vals(int64_t l, int64_t r,
 
 ObSortOpImpl::Compare::Compare()
   : ret_(OB_SUCCESS), sort_collations_(nullptr), sort_cmp_funs_(nullptr),
-    exec_ctx_(nullptr), access_ctx_(nullptr), cmp_count_(0), cmp_start_(0), cmp_end_(0)
+    exec_ctx_(nullptr), access_ctx_(nullptr), cmp_count_(0), cmp_start_(0), cmp_end_(0),
+    single_key_valid_(false), single_key_ascending_(true), single_key_idx_(0),
+    single_key_cmp_(nullptr)
 {
 }
 
@@ -380,6 +382,13 @@ int ObSortOpImpl::Compare::init(
     cmp_start_ = 0;
     cmp_end_ = sort_cmp_funs_->count();
     enable_encode_sortkey_ = enable_encode_sortkey;
+    single_key_valid_ = (1 == cnt_ && nullptr != sort_cmp_funs_->at(0).cmp_func_);
+    if (single_key_valid_) {
+      const ObSortFieldCollation &collation = sort_collations_->at(0);
+      single_key_idx_ = collation.field_idx_;
+      single_key_ascending_ = collation.is_ascending_;
+      single_key_cmp_ = sort_cmp_funs_->at(0).cmp_func_;
+    }
   }
   return ret;
 }
@@ -413,6 +422,17 @@ bool ObSortOpImpl::Compare::operator()(
     int cmp = 0;
     cmp = MEMCMP(l_cell.ptr_, r_cell.ptr_, min(l_cell.len_, r_cell.len_));
     less = cmp != 0 ? (cmp < 0) : (l_cell.len_ - r_cell.len_) < 0;
+  } else if (OB_LIKELY(single_key_valid_ && 0 == cmp_start_ && 1 == cmp_end_)) {
+    int cmp = 0;
+    if (OB_FAIL(single_key_cmp_(l->cells()[single_key_idx_],
+                                r->cells()[single_key_idx_],
+                                cmp,
+                                access_ctx_))) {
+    } else if (cmp < 0) {
+      less = single_key_ascending_;
+    } else if (cmp > 0) {
+      less = !single_key_ascending_;
+    }
   } else {
     const ObDatum *lcells = l->cells();
     const ObDatum *rcells = r->cells();

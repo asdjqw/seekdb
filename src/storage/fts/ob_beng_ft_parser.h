@@ -39,6 +39,8 @@ public:
       english_analyzer_(),
       doc_(),
       token_stream_(nullptr),
+      ascii_cursor_(0),
+      ascii_document_(false),
       is_inited_(false)
   {}
   ~ObBEngFTParser() { reset(); }
@@ -56,12 +58,19 @@ private:
   int segment(
       const common::ObDatum &doc,
       share::ObITokenStream *&token_stream);
+  int get_next_ascii_token(
+      const char *&word,
+      int64_t &word_len,
+      int64_t &char_len,
+      int64_t &word_freq);
 private:
   common::ObIAllocator &allocator_;
   share::ObTextAnalysisCtx analysis_ctx_;
   share::ObEnglishTextAnalyzer english_analyzer_;
   common::ObDatum doc_;
   share::ObITokenStream *token_stream_;
+  uint32_t ascii_cursor_;
+  bool ascii_document_;
   bool is_inited_;
 
   DISALLOW_COPY_AND_ASSIGN(ObBEngFTParser);

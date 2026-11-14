@@ -551,7 +551,33 @@ int ObCharset::strcmp(ObCollationType collation_type,
                       int64_t str2_len)
 {
   int result = 0;
-  if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
+  // Hot path of a dictionary lookup: the tokenizer compares the next character
+  // against a range's first character once per character of a document, and
+  // validating plus resolving the collation on each of those is a measurable
+  // share of a fulltext index build. Anything unexpected takes the original
+  // path below.
+  const ObCharsetInfo *fast_cs = NULL;
+  if (OB_LIKELY(collation_type > CS_TYPE_INVALID && collation_type < CS_TYPE_MAX)) {
+    fast_cs = charset_arr_inited[collation_type];
+  }
+  if (OB_LIKELY(NULL != fast_cs && NULL != fast_cs->coll
+                && 0 <= str1_len && 0 <= str2_len
+                && (NULL != str1 || 0 == str1_len)
+                && (NULL != str2 || 0 == str2_len))) {
+    // A sort of fulltext keys compares the same word against itself over and
+    // over, and identical bytes compare equal under every collation, so settle
+    // those without walking the collation at all.
+    if (str1_len == str2_len && (0 == str1_len || 0 == MEMCMP(str1, str2, str1_len))) {
+      result = 0;
+    } else {
+      result = fast_cs->coll->strnncoll(fast_cs,
+                                        reinterpret_cast<const unsigned char *>(str1),
+                                        str1_len,
+                                        reinterpret_cast<const unsigned char *>(str2),
+                                        str2_len,
+                                        false);
+    }
+  } else if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
     const ObCharsetInfo *cs = get_charset(collation_type);
     const bool t_is_prefix = false;
     result = cs->coll->strnncoll(cs,
@@ -571,14 +597,45 @@ int ObCharset::strcmpsp(ObCollationType collation_type,
                         bool cmp_endspace)
 {
   int result = 0;
-  if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
+  // Hot path. This runs once per comparison of a string sort key, where the two
+  // buffers always come out of ObDatum values and the collation was already
+  // resolved when the expression was built. The generic validation below costs
+  // a call to get_charset_uninit (a switch over the supported collations) plus
+  // a second resolution inside get_charset on every single comparison, which is
+  // a measurable share of an index build, so look the charset up directly and
+  // keep only the checks that can actually fail. Anything unexpected still
+  // takes the original path below.
+  const ObCharsetInfo *fast_cs = NULL;
+  if (OB_LIKELY(collation_type > CS_TYPE_INVALID && collation_type < CS_TYPE_MAX)) {
+    fast_cs = charset_arr_inited[collation_type];
+  }
+  if (OB_LIKELY(NULL != fast_cs && NULL != fast_cs->cset
+                && 0 <= str1_len && 0 <= str2_len
+                && (NULL != str1 || 0 == str1_len)
+                && (NULL != str2 || 0 == str2_len))) {
+    // Same reasoning as ObCharset::strcmp above: identical bytes compare equal
+    // under every collation, space padding included, so skip the collation walk
+    // that a repeated sort key would otherwise pay for every comparison.
+    if (str1_len == str2_len && (0 == str1_len || 0 == MEMCMP(str1, str2, str1_len))) {
+      result = 0;
+    } else {
+      result = fast_cs->coll->strnncollsp(fast_cs,
+                                          reinterpret_cast<const unsigned char *>(str1),
+                                          str1_len,
+                                          reinterpret_cast<const unsigned char *>(str2),
+                                          str2_len,
+                                          cmp_endspace);
+    }
+  } else if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
     const ObCharsetInfo *cs = get_charset(collation_type);
-    result = cs->coll->strnncollsp(cs,
-                                reinterpret_cast<const unsigned char *>(str1),
-                                str1_len,
-                                reinterpret_cast<const unsigned char *>(str2),
-                                str2_len,
-                                cmp_endspace);
+    if (OB_LIKELY(NULL != cs)) {
+      result = cs->coll->strnncollsp(cs,
+                                     reinterpret_cast<const unsigned char *>(str1),
+                                     str1_len,
+                                     reinterpret_cast<const unsigned char *>(str2),
+                                     str2_len,
+                                     cmp_endspace);
+    }
   }
   return result;
 }
@@ -1719,29 +1776,42 @@ int ObCharset::first_valid_char(
     int64_t &char_len)
 {
   int ret = OB_SUCCESS;
+  const ObCharsetInfo *cs = NULL;
   if (OB_UNLIKELY(collation_type <= CS_TYPE_INVALID ||
                   collation_type >= CS_TYPE_MAX)) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(get_charset(collation_type))) {
+  } else if (OB_ISNULL(cs = get_charset(collation_type))) {
+    ret = OB_NOT_SUPPORTED;
+  } else {
+    ret = first_valid_char(cs, buf, buf_size, char_len);
+  }
+  return ret;
+}
+
+int ObCharset::first_valid_char(
+    const ObCharsetInfo *cs,
+    const char *buf,
+    const int64_t buf_size,
+    int64_t &char_len)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(cs)) {
     ret = OB_NOT_SUPPORTED;
   } else if (OB_UNLIKELY(NULL == buf)) {
     ret = OB_NOT_INIT;
   } else if (buf_size <= 0) {
     char_len = 0;
+  } else if (OB_ISNULL(cs->cset)) {
+    ret = OB_ERR_UNEXPECTED;
   } else {
     int error = 0;
-    int64_t len = 0;
-    const ObCharsetInfo *cs = get_charset(collation_type);
-    if (OB_ISNULL(cs->cset)) {
-      ret = OB_ERR_UNEXPECTED;
+    int64_t len =
+        static_cast<int64_t>(cs->cset->well_formed_len(cs, buf, buf + buf_size, 1, &error));
+    if (OB_LIKELY(0 == error)) {
+      char_len = len;
     } else {
-      len = static_cast<int64_t>(cs->cset->well_formed_len(cs, buf, buf + buf_size, 1, &error));
-      if (OB_LIKELY(0 == error)) {
-        char_len = len;
-      } else {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("invalid encoding found");
-      }
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid encoding found");
     }
   }
   return ret;

@@ -37,6 +37,14 @@ int ObIKLetterProcessor::do_process(TokenizeContext &ctx,
                                     const ObFTCharUtil::CharType type)
 {
   int ret = OB_SUCCESS;
+  // No letter run is open and this character cannot start one, so all three
+  // sub-processors would only test their start offset and return.  Chinese
+  // documents spend most of their characters in this state.
+  if (-1 == english_start_ && -1 == arabic_start_ && -1 == mix_start_
+      && ObFTCharUtil::CharType::ENGLISH_LETTER != type
+      && ObFTCharUtil::CharType::ARABIC_LETTER != type) {
+    return ret;
+  }
   if (OB_FAIL(process_english_letter(ctx, ch, char_len, type))) {
   } else if (OB_FAIL(process_arabic_letter(ctx, ch, char_len, type))) {
   } else if (OB_FAIL(process_mix_letter(ctx, ch, char_len, type))) {

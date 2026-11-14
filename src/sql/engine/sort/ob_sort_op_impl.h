@@ -480,6 +480,10 @@ public:
     int64_t cmp_count_;
     int64_t cmp_start_;
     int64_t cmp_end_;
+    bool single_key_valid_;
+    bool single_key_ascending_;
+    int64_t single_key_idx_;
+    common::ObDatumCmpFuncType single_key_cmp_;
   private:
     int64_t cnt_;
     DISALLOW_COPY_AND_ASSIGN(Compare);

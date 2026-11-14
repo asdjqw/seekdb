@@ -42,9 +42,44 @@ struct ObStringDiffHeader
   struct LeftToRight
   {
     template <typename L, typename R>
-    void operator()(L l, R r, int64_t n)
+    inline void operator()(L l, R r, int64_t n)
     {
-      MEMCPY(r, l, n);
+      char *dst = reinterpret_cast<char *>(r);
+      const char *src = reinterpret_cast<const char *>(l);
+      // Diff segments are tiny (16-byte doc ids decode as 2-3 segments); a
+      // direct libc memcpy call per segment costs more than the copy itself,
+      // so decompose small lengths into register-sized moves.
+      if (OB_LIKELY(n >= 0 && n <= 16)) {
+        while (n >= 8) {
+          uint64_t v = 0;
+          MEMCPY(&v, src, 8);
+          MEMCPY(dst, &v, 8);
+          src += 8;
+          dst += 8;
+          n -= 8;
+        }
+        if (n >= 4) {
+          uint32_t v = 0;
+          MEMCPY(&v, src, 4);
+          MEMCPY(dst, &v, 4);
+          src += 4;
+          dst += 4;
+          n -= 4;
+        }
+        if (n >= 2) {
+          uint16_t v = 0;
+          MEMCPY(&v, src, 2);
+          MEMCPY(dst, &v, 2);
+          src += 2;
+          dst += 2;
+          n -= 2;
+        }
+        if (n >= 1) {
+          *dst = *src;
+        }
+      } else {
+        MEMCPY(dst, src, n);
+      }
     }
   };
 

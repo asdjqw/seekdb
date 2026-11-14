@@ -1,3 +1,19 @@
+/*
+ * Copyright (c) 2026 OceanBase.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "sql/resolver/dml/ob_file_sql_table.h"
@@ -7,12 +23,19 @@
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/resolver/ob_resolver.h"
+#include "sql/resolver/ob_resolver_utils.h"
+#include "sql/ob_sql_utils.h"
+#include "share/system_variable/ob_sys_var_class_type.h"
+#include "lib/ob_errno.h"
+#include "lib/utility/ob_macro_utils.h"
 #include "common/object/ob_object.h"
 #include "common/timezone/ob_time_def.h"
 #include "lib/charset/ob_dtoa.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +58,86 @@ namespace
 {
 
 constexpr int64_t FILE_SQL_MAX_BYTES = 128L * 1024L * 1024L;
+
+// File SQL is deliberately restricted to the same canonical path policy as
+// LOAD DATA/SELECT ... INTO OUTFILE.  Checking the canonical path after glob
+// expansion prevents both ".." traversal and symlink escapes.
+int check_file_sql_path(const ObString &secure_file_priv, const std::string &path)
+{
+  int ret = OB_SUCCESS;
+  char canonical[MAX_PATH_SIZE] = {0};
+  const char *resolved = NULL;
+#ifdef _WIN32
+  resolved = ::_fullpath(canonical, path.c_str(), sizeof(canonical));
+#else
+  resolved = ::realpath(path.c_str(), canonical);
+#endif
+  if (OB_ISNULL(resolved)) {
+    ret = OB_FILE_NOT_EXIST;
+  } else {
+    ObString full_path(static_cast<int32_t>(strlen(resolved)), resolved);
+    ret = ObResolverUtils::check_secure_path(secure_file_priv, full_path);
+  }
+  return ret;
+}
+
+// COPY creates a new file, so realpath(path) cannot be used before opening it.
+// Canonicalize the existing parent directory instead and reject an existing
+// destination.  This keeps the same secure_file_priv and symlink policy as
+// read_csv/read_json/read_parquet.
+int check_copy_destination_path(const ObString &secure_file_priv, const std::string &path)
+{
+  int ret = OB_SUCCESS;
+#ifdef _WIN32
+  struct _stat st;
+  if (0 == ::_stat(path.c_str(), &st)) {
+#else
+  struct stat st;
+  if (0 == ::stat(path.c_str(), &st)) {
+#endif
+    ret = OB_FILE_ALREADY_EXIST;
+  } else if (errno != ENOENT) {
+    ret = OB_IO_ERROR;
+  } else {
+    const std::size_t sep = path.find_last_of("/\\");
+    std::string parent = sep == std::string::npos ? "." : path.substr(0, sep);
+    const std::string base = sep == std::string::npos ? path : path.substr(sep + 1);
+    if (parent.empty()) {
+#ifdef _WIN32
+      parent = "\\";
+#else
+      parent = "/";
+#endif
+    }
+    if (base.empty()) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      char canonical[MAX_PATH_SIZE] = {0};
+      const char *resolved = NULL;
+#ifdef _WIN32
+      resolved = ::_fullpath(canonical, parent.c_str(), sizeof(canonical));
+#else
+      resolved = ::realpath(parent.c_str(), canonical);
+#endif
+      if (OB_ISNULL(resolved)) {
+        ret = OB_FILE_NOT_EXIST;
+      } else {
+        std::string full_path(resolved);
+        if (full_path.empty() || (full_path.back() != '/' && full_path.back() != '\\')) {
+#ifdef _WIN32
+          full_path.push_back('\\');
+#else
+          full_path.push_back('/');
+#endif
+        }
+        full_path.append(base);
+        ObString full(static_cast<int32_t>(full_path.length()), full_path.c_str());
+        ret = ObResolverUtils::check_secure_path(secure_file_priv, full);
+      }
+    }
+  }
+  return ret;
+}
 
 bool eq_cstr(const ObString &s, const char *lit)
 {
@@ -174,6 +277,19 @@ int parse_csv(const std::string &data, TextTable &table)
   }
   if (OB_SUCC(ret)) {
     const std::vector<std::string> &header = rows[0];
+    for (std::size_t r = 1; OB_SUCC(ret) && r < rows.size(); ++r) {
+      // A short or over-wide record is a malformed CSV row.  Silently
+      // truncating it would shift columns and produce plausible but wrong
+      // query results.
+      if (rows[r].size() != header.size()) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("csv row has a different field count", K(ret), K(r),
+                 K(rows[r].size()), K(header.size()));
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    const std::vector<std::string> &header = rows[0];
     table.cols.resize(header.size());
     for (std::size_t c = 0; c < header.size(); ++c) {
       int occ = 1;
@@ -213,6 +329,7 @@ int parse_json_string(const std::string &s, std::size_t &i, std::string &out)
 {
   int ret = OB_SUCCESS;
   out.clear();
+  bool closed = false;
   if (i >= s.size() || s[i] != '"') {
     ret = OB_INVALID_ARGUMENT;
   } else {
@@ -220,6 +337,7 @@ int parse_json_string(const std::string &s, std::size_t &i, std::string &out)
     while (OB_SUCC(ret) && i < s.size()) {
       char c = s[i++];
       if (c == '"') {
+        closed = true;
         break;
       } else if (c == '\\') {
         if (i >= s.size()) {
@@ -264,8 +382,59 @@ int parse_json_string(const std::string &s, std::size_t &i, std::string &out)
         out.push_back(c);
       }
     }
+    if (OB_SUCC(ret) && !closed) {
+      ret = OB_INVALID_ARGUMENT;
+    }
   }
   return ret;
+}
+
+bool is_json_number(const std::string &s)
+{
+  if (s.empty()) {
+    return false;
+  }
+  std::size_t i = 0;
+  if (s[i] == '-') {
+    if (++i == s.size()) {
+      return false;
+    }
+  }
+  if (s[i] == '0') {
+    ++i;
+    if (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+      return false;
+    }
+  } else if (s[i] >= '1' && s[i] <= '9') {
+    while (++i < s.size() && s[i] >= '0' && s[i] <= '9') {
+    }
+  } else {
+    return false;
+  }
+  if (i < s.size() && s[i] == '.') {
+    ++i;
+    std::size_t begin = i;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+      ++i;
+    }
+    if (begin == i) {
+      return false;
+    }
+  }
+  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    ++i;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) {
+      ++i;
+    }
+    std::size_t begin = i;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+      ++i;
+    }
+    if (begin == i) {
+      return false;
+    }
+  }
+  return i == s.size();
 }
 
 int parse_jsonl(const std::string &data, TextTable &table)
@@ -332,16 +501,27 @@ int parse_jsonl(const std::string &data, TextTable &table)
             } else if (i < line.size() && line[i] == '"') {
               if (OB_FAIL(parse_json_string(line, i, val))) {
               }
+            } else if (i < line.size() && (line[i] == '{' || line[i] == '[')) {
+              // The file SQL JSONL contract is intentionally limited to
+              // flat scalar objects; nested objects and arrays are rejected
+              // instead of being misread as truncated strings.
+              ret = OB_NOT_SUPPORTED;
             } else {
               std::size_t start = i;
               while (i < line.size() && line[i] != ',' && line[i] != '}' && line[i] != ' ') {
                 ++i;
               }
               val = line.substr(start, i - start);
-              if (val.empty()) {
+              if (val.empty() || !is_json_number(val)) {
                 ret = OB_INVALID_ARGUMENT;
               }
             }
+          }
+        }
+        if (OB_SUCC(ret)) {
+          skip_ws(line, i);
+          if (i >= line.size() || (line[i] != ',' && line[i] != '}')) {
+            ret = OB_INVALID_ARGUMENT;
           }
         }
         if (OB_SUCC(ret)) {
@@ -363,6 +543,12 @@ int parse_jsonl(const std::string &data, TextTable &table)
           kvs.push_back(std::make_pair(key, is_null ? std::string() : val));
           present.push_back(!is_null);
           (void)idx;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        skip_ws(line, i);
+        if (i != line.size()) {
+          ret = OB_INVALID_ARGUMENT;
         }
       }
       if (OB_SUCC(ret)) {
@@ -402,14 +588,28 @@ bool parse_i64(const std::string &s, int64_t &out)
       return false;
     }
   }
-  int64_t v = 0;
+  uint64_t v = 0;
+  const uint64_t limit = sign < 0 ? static_cast<uint64_t>(INT64_MAX) + 1ULL
+                                 : static_cast<uint64_t>(INT64_MAX);
   for (; i < s.size(); ++i) {
     if (s[i] < '0' || s[i] > '9') {
       return false;
     }
-    v = v * 10 + (s[i] - '0');
+    const uint64_t digit = static_cast<uint64_t>(s[i] - '0');
+    if (v > (limit - digit) / 10) {
+      return false;
+    }
+    v = v * 10 + digit;
   }
-  out = v * sign;
+  if (sign < 0) {
+    if (v == static_cast<uint64_t>(INT64_MAX) + 1ULL) {
+      out = INT64_MIN;
+    } else {
+      out = -static_cast<int64_t>(v);
+    }
+  } else {
+    out = static_cast<int64_t>(v);
+  }
   return true;
 }
 
@@ -421,7 +621,7 @@ bool parse_f64(const std::string &s, double &out)
   }
   char *end = NULL;
   out = strtod(s.c_str(), &end);
-  return end == s.c_str() + s.size();
+  return end == s.c_str() + s.size() && std::isfinite(out);
 }
 
 bool parse_ymd(const char *s, int &y, int &m, int &d)
@@ -436,7 +636,14 @@ bool parse_ymd(const char *s, int &y, int &m, int &d)
   y = (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 + (s[3] - '0');
   m = (s[5] - '0') * 10 + (s[6] - '0');
   d = (s[8] - '0') * 10 + (s[9] - '0');
-  return m >= 1 && m <= 12 && d >= 1 && d <= 31;
+  if (m < 1 || m > 12 || d < 1) {
+    return false;
+  }
+  const bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+  static const int days_in_month[] = {0, 31, 28, 31, 30, 31, 30,
+                                      31, 31, 30, 31, 30, 31};
+  const int max_day = m == 2 && leap ? 29 : days_in_month[m];
+  return d <= max_day;
 }
 
 bool parse_date_text(const std::string &s, int &y, int &m, int &d)
@@ -495,6 +702,7 @@ int infer_text_table(TextTable &table, ObIAllocator &alloc, ObFileSqlMeta &meta)
   int ret = OB_SUCCESS;
   meta.col_cnt_ = static_cast<int64_t>(table.cols.size());
   meta.row_cnt_ = table.rows;
+  std::vector<ObFileSqlCell::Type> kinds(table.cols.size(), ObFileSqlCell::STR);
   for (std::size_t c = 0; OB_SUCC(ret) && c < table.cols.size(); ++c) {
     bool any = false;
     bool all_bool = true, all_int = true, all_num = true, all_date = true, all_dt = true;
@@ -534,6 +742,7 @@ int infer_text_table(TextTable &table, ObIAllocator &alloc, ObFileSqlMeta &meta)
       kind = ObFileSqlCell::DATE;
       type_name = "DATE";
     }
+    kinds[c] = kind;
     ObFileSqlColumn col;
     if (OB_FAIL(copy_text(alloc, table.cols[c].name, col.name_))) {
     } else {
@@ -543,12 +752,19 @@ int infer_text_table(TextTable &table, ObIAllocator &alloc, ObFileSqlMeta &meta)
         ret = OB_ALLOCATE_MEMORY_FAILED;
       }
     }
-    for (int64_t r = 0; OB_SUCC(ret) && r < table.rows; ++r) {
+  }
+  // ObFileSqlMeta::cell(row, col) addresses cells row by row, so cells must be
+  // appended in row-major order.  The text formats (CSV/JSONL) used to append
+  // them column by column, which transposed the table and made every projected
+  // column read the values of another column.
+  for (int64_t r = 0; OB_SUCC(ret) && r < table.rows; ++r) {
+    for (std::size_t c = 0; OB_SUCC(ret) && c < table.cols.size(); ++c) {
       ObFileSqlCell cell;
       if (table.cols[c].is_null[static_cast<std::size_t>(r)]) {
         cell.type_ = ObFileSqlCell::NUL;
       } else {
         const std::string &text = table.cols[c].text[static_cast<std::size_t>(r)];
+        const ObFileSqlCell::Type kind = kinds[c];
         cell.type_ = kind;
         int y = 0, m = 0, d = 0, hh = 0, mi = 0, ss = 0;
         if (kind == ObFileSqlCell::BOOL) {
@@ -1296,16 +1512,19 @@ int ObDMLResolver::resolve_file_sql_table_item(const ParseNode &table_node, Tabl
   int ret = OB_SUCCESS;
   ObDMLStmt *stmt = get_stmt();
   bool enabled = false;
+  ObString secure_file_priv;
   if (OB_ISNULL(stmt) || OB_ISNULL(allocator_) || OB_ISNULL(session_info_)
       || OB_ISNULL(params_.expr_factory_)
       || table_node.type_ != T_FILE_SQL_TABLE || table_node.num_child_ < 1
       || OB_ISNULL(table_node.children_) || OB_ISNULL(table_node.children_[0])) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(session_info_->get_bool_sys_var(SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+  } else if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
     LOG_WARN("failed to read enable_file_sql", K(ret));
   } else if (!enabled) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql");
+  } else if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
+    LOG_WARN("failed to read secure_file_priv", K(ret));
   } else {
     bool header = true;
     bool saw_sample = false;
@@ -1319,13 +1538,19 @@ int ObDMLResolver::resolve_file_sql_table_item(const ParseNode &table_node, Tabl
         ret = OB_ERR_PARSE_SQL;
       } else if (OB_FAIL(resolve_sql_expr(*opt->children_[1], val_expr))) {
       } else if (OB_ISNULL(val_expr) || OB_FAIL(val_expr->formalize(session_info_))) {
-      } else if (!val_expr->is_const_raw_expr()) {
+      } else if ((!val_expr->is_const_raw_expr() && !val_expr->is_static_scalar_const_expr())
+                 || (T_QUESTIONMARK == val_expr->get_expr_type()
+                     && params_.is_prepare_protocol_)) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "non-constant file sql option");
       } else {
         ObString name(opt->children_[0]->str_len_, opt->children_[0]->str_value_);
-        const ObObj &obj = static_cast<ObConstRawExpr *>(val_expr)->get_value();
-        if (eq_cstr(name, "header")) {
+        ObObj obj;
+        if (OB_ISNULL(params_.param_list_)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ObSQLUtils::calc_simple_expr_without_row(
+                       session_info_, val_expr, obj, params_.param_list_, *allocator_))) {
+        } else if (eq_cstr(name, "header")) {
           if (!obj.is_integer_type()) {
             ret = OB_INVALID_ARGUMENT;
           } else if (obj.get_int() == 0) {
@@ -1359,28 +1584,39 @@ int ObDMLResolver::resolve_file_sql_table_item(const ParseNode &table_node, Tabl
     ObRawExpr *path_expr = NULL;
     std::string path;
     const int64_t kind = table_node.value_;
+    const ParseNode &path_node = *table_node.children_[0];
     if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(resolve_sql_expr(*table_node.children_[0], path_expr))) {
+    } else if (OB_FAIL(resolve_sql_expr(path_node, path_expr))) {
     } else if (OB_ISNULL(path_expr) || OB_FAIL(path_expr->formalize(session_info_))) {
-    } else if (!path_expr->is_const_raw_expr()
-               || !static_cast<ObConstRawExpr *>(path_expr)->get_value().is_string_type()) {
+    } else if ((!path_expr->is_const_raw_expr() && !path_expr->is_static_scalar_const_expr())
+               || (T_QUESTIONMARK == path_expr->get_expr_type()
+                   && params_.is_prepare_protocol_)) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "non-constant file sql path");
     } else {
-      ObString p = static_cast<ObConstRawExpr *>(path_expr)->get_value().get_string();
-      path.assign(p.ptr(), static_cast<std::size_t>(p.length()));
-      if (kind == 1) {
-        if (!format.empty() && !eq_cstr(format, "newline_delimited")) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "json format");
-        }
-      } else if (!format.empty() && kind == 0 && !eq_cstr(format, "csv")) {
+      ObObj path_obj;
+      if (OB_ISNULL(params_.param_list_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(ObSQLUtils::calc_simple_expr_without_row(
+                     session_info_, path_expr, path_obj, params_.param_list_, *allocator_))) {
+      } else if (!path_obj.is_string_type()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "non-constant file sql path");
+      } else {
+        ObString p = path_obj.get_string();
+        path.assign(p.ptr(), static_cast<std::size_t>(p.length()));
+      }
+    }
+    if (OB_SUCC(ret) && kind == 1 && !format.empty()
+        && !eq_cstr(format, "newline_delimited")) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "json format");
+    } else if (OB_SUCC(ret) && !format.empty() && kind == 0 && !eq_cstr(format, "csv")) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "csv format");
-      } else if (!format.empty() && kind != 0 && kind != 1) {
+    } else if (OB_SUCC(ret) && !format.empty() && kind != 0 && kind != 1) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql format");
-      }
     }
     (void)header;
     (void)saw_sample;
@@ -1394,11 +1630,24 @@ int ObDMLResolver::resolve_file_sql_table_item(const ParseNode &table_node, Tabl
     } else if (kind == 3) {
       std::vector<std::string> paths;
       if (OB_FAIL(list_glob(path, paths))) {
-      } else if (OB_FAIL(fill_glob(paths, *allocator_, *meta))) {
+      } else if (paths.empty()) {
+        ret = OB_FILE_NOT_EXIST;
+      } else {
+        for (const std::string &matched_path : paths) {
+          if (OB_FAIL(check_file_sql_path(secure_file_priv, matched_path))) {
+            LOG_WARN("file sql path is outside secure_file_priv", K(ret), K(matched_path.c_str()));
+            break;
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ret = fill_glob(paths, *allocator_, *meta);
+        }
       }
     } else {
       std::string bytes;
-      if (OB_FAIL(read_whole_file(path, bytes))) {
+      if (OB_FAIL(check_file_sql_path(secure_file_priv, path))) {
+        LOG_WARN("file sql path is outside secure_file_priv", K(ret), K(path.c_str()));
+      } else if (OB_FAIL(read_whole_file(path, bytes))) {
       } else if (kind == 0) {
         TextTable text;
         if (OB_FAIL(parse_csv(bytes, text))) {
@@ -1625,10 +1874,13 @@ int ObCopyFileSqlResolver::resolve(const ParseNode &parse_tree)
     ret = OB_ERR_UNEXPECTED;
   } else {
     bool enabled = false;
-    if (OB_FAIL(params_.session_info_->get_bool_sys_var(SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+    ObString secure_file_priv;
+    if (OB_FAIL(params_.session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
     } else if (!enabled) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql");
+    } else if (OB_FAIL(params_.session_info_->get_secure_file_priv(secure_file_priv))) {
+      LOG_WARN("failed to read secure_file_priv", K(ret));
     }
     bool write_header = false;
     std::string nullstr;
@@ -1750,11 +2002,15 @@ int ObCopyFileSqlResolver::resolve(const ParseNode &parse_tree)
         std::string out_path(parse_tree.children_[1]->str_value_,
                              static_cast<std::size_t>(parse_tree.children_[1]->str_len_));
         FILE *fp = NULL;
+        bool created = false;
         if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(check_copy_destination_path(secure_file_priv, out_path))) {
+          LOG_WARN("COPY destination is not allowed", K(ret), K(out_path.c_str()));
         } else if (OB_ISNULL(fp = fopen(out_path.c_str(), "wb"))) {
           ret = OB_IO_ERROR;
           LOG_WARN("failed to open COPY destination", K(ret), K(out_path.c_str()));
         } else {
+          created = true;
           if (write_header) {
             for (std::size_t c = 0; c < headers.size(); ++c) {
               if (c != 0) {
@@ -1779,6 +2035,9 @@ int ObCopyFileSqlResolver::resolve(const ParseNode &parse_tree)
             ret = OB_IO_ERROR;
           }
           fclose(fp);
+          if (OB_FAIL(ret) && created) {
+            (void)remove(out_path.c_str());
+          }
         }
       }
     }

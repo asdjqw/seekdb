@@ -22,6 +22,7 @@
 #include "data_plane/fts/dict/ob_gen_dic_loader.h"
 #include "data_plane/fts/dict/ob_dic_lock_service.h"
 #include "share/ob_server_struct.h"
+#include "share/rc/ob_server_runtime.h"
 #include "data_plane/fts/ob_fts_parser_helper.h"
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_utils.h"
@@ -1047,7 +1048,15 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        decided_parallelism = MAX(original_parallelism / 3, 1L);
+        // A fulltext auxiliary build is scan + tokenize + sort + write and
+        // parallelizes with PX.  Derive a degree when the statement keeps the
+        // default; statements that asked for one keep the existing derivation.
+        if (original_parallelism <= 1) {
+          decided_parallelism = MIN(static_cast<int64_t>(8),
+                                    MAX(static_cast<int64_t>(share::server_cpu_count()) / 2, 1L));
+        } else {
+          decided_parallelism = MAX(original_parallelism / 3, 1L);
+        }
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:

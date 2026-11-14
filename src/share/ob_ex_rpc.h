@@ -139,7 +139,7 @@ auto async_call(Fn &&fn) -> HandleRef<Res> {
 template<typename Res, typename Arg, typename Fn>
 auto async_call(const Arg &arg, Fn &&fn) -> HandleRef<Res> {
     int64_t len = common::serialization::encoded_length(arg);
-    auto buf = std::make_shared<char[]>(len + common::OB_MALLOC_BIG_BLOCK_SIZE);
+    std::shared_ptr<char[]> buf(new char[len + common::OB_MALLOC_BIG_BLOCK_SIZE]);
     int64_t pos = 0;
     common::serialization::encode(buf.get(), len + common::OB_MALLOC_BIG_BLOCK_SIZE, pos, arg);
     if constexpr (std::is_void_v<Res>) {

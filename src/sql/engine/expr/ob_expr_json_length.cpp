@@ -164,12 +164,63 @@ int ObExprJsonLength::eval_json_length(const ObExpr &expr, ObEvalCtx &ctx, ObDat
   return ret;
 }
 
+int ObExprJsonLength::eval_json_length_batch(const ObExpr &expr,
+                                             ObEvalCtx &ctx,
+                                             const ObBitVector &skip,
+                                             const int64_t batch_size)
+{
+  INIT_SUCC(ret);
+  ObExpr *arg0 = expr.args_[0];
+  ObExpr *arg1 = expr.arg_cnt_ > 1 ? expr.args_[1] : NULL;
+  if (OB_FAIL(arg0->eval_batch(ctx, skip, batch_size))) {
+  } else if (OB_NOT_NULL(arg1) && OB_FAIL(arg1->eval_batch(ctx, skip, batch_size))) {
+  } else {
+    ObDatum *results = expr.locate_batch_datums(ctx);
+    ObDatum *data0 = arg0->locate_batch_datums(ctx);
+    ObDatum *data1 = OB_NOT_NULL(arg1) ? arg1->locate_batch_datums(ctx) : NULL;
+    ObBitVector &evaluated_flags = expr.get_evaluated_flags(ctx);
+    ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
+    MultimodeAlloctor tmp_allocator(tmp_alloc_g.get_allocator());
+    ObJsonPathCache ctx_cache(&tmp_allocator);
+    ObJsonPathCache *path_cache =
+        ObJsonExprHelper::get_path_cache_ctx(expr.expr_ctx_id_, &ctx.exec_ctx_);
+    path_cache = OB_NOT_NULL(path_cache) ? path_cache : &ctx_cache;
+    if (OB_ISNULL(results) || OB_ISNULL(data0)) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < batch_size; ++i) {
+      if (skip.at(i) || evaluated_flags.at(i)) {
+      } else if (OB_FAIL(calc(ctx,
+                              arg0->is_batch_result()
+                                  ? data0[i]
+                                  : arg0->locate_expr_datum(ctx),
+                              arg0->datum_meta_,
+                              arg0->obj_meta_.has_lob_header(),
+                              OB_ISNULL(data1)
+                                  ? NULL
+                                  : (arg1->is_batch_result()
+                                      ? &data1[i]
+                                      : &arg1->locate_expr_datum(ctx)),
+                              OB_NOT_NULL(arg1) ? arg1->datum_meta_ : ObDatumMeta(),
+                              OB_NOT_NULL(arg1) && arg1->obj_meta_.has_lob_header(),
+                              &tmp_allocator,
+                              results[i],
+                              path_cache))) {
+      } else {
+        evaluated_flags.set(i);
+      }
+    }
+  }
+  return ret;
+}
+
 int ObExprJsonLength::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
                               ObExpr &rt_expr) const
 {
   UNUSED(expr_cg_ctx);
   UNUSED(raw_expr);
   rt_expr.eval_func_ = eval_json_length;
+  rt_expr.eval_batch_func_ = eval_json_length_batch;
   return OB_SUCCESS;
 }
 

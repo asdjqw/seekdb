@@ -12034,11 +12034,14 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
   } else if (OB_FAIL(prepare_text_retrieval_info(table_scan->get_real_ref_table_id(),
                                                  table_scan->get_index_table_id(),
                                                  match_against,
-                                                 table_scan->get_text_retrieval_info()))) {
+                                                 table_scan->get_text_retrieval_info(),
+                                                 true /*allow_skip_relevance*/))) {
   } else {
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
     tr_info.match_expr_ = match_against;
-    tr_info.pushdown_match_filter_ = match_pred;
+    // Without score calculation the retrieval scan returns exactly the matched
+    // documents, so the score filter is always true.
+    tr_info.pushdown_match_filter_ = tr_info.need_calc_relevance_ ? match_pred : nullptr;
     // The mapping table is absent when the data-table rowkey is used as the document ID.
     table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
     if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
@@ -12170,7 +12173,8 @@ int ObLogPlan::prepare_text_retrieval_merge(const ObIArray<ObRawExpr *> &merge_m
 int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
                                            const uint64_t index_table_id,
                                            ObMatchFunRawExpr *match_against,
-                                           ObTextRetrievalInfo &tr_info)
+                                           ObTextRetrievalInfo &tr_info,
+                                           const bool allow_skip_relevance)
 {
   int ret = OB_SUCCESS;
   ObSchemaGetterGuard *schema_guard = NULL;
@@ -12251,18 +12255,51 @@ int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
     }
   }
   if (OB_SUCC(ret)) {
-    /*
-    if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(get_optimizer_context().get_exec_ctx(),
-                                                              get_stmt(),
-                                                              match_against,
-                                                              need_calc_relevance,
-                                                              constraints))) {
-      LOG_WARN("failed to check need calc relevance", K(ret));
-    } else if (!need_calc_relevance &&
-               OB_FAIL(append_array_no_dup(get_optimizer_context().get_query_ctx()->all_expr_constraints_, constraints))) {
-      LOG_WARN("failed to append array no dup", K(ret));
+    // The score is only needed when the statement consumes it.  Natural
+    // language MATCH without a score reference can return the matching
+    // document set directly and skip the BM25 machinery.
+    if (allow_skip_relevance
+        && NATURAL_LANGUAGE_MODE == match_against->get_mode_flag()
+        && !match_against->is_es_match()) {
+      const ObSelectStmt *select_stmt = get_stmt()->is_select_stmt()
+          ? static_cast<const ObSelectStmt *>(get_stmt()) : nullptr;
+      bool can_skip = false;
+      if (OB_ISNULL(select_stmt)) {
+      } else if (1 == select_stmt->get_select_item_size()
+                 && OB_NOT_NULL(select_stmt->get_select_item(0).expr_)
+                 && T_FUN_COUNT == select_stmt->get_select_item(0).expr_->get_expr_type()
+                 && select_stmt->get_group_exprs().empty()
+                 && select_stmt->get_having_exprs().empty()
+                 && 0 == select_stmt->get_order_item_size()) {
+        can_skip = true;
+        // Only MATCH predicates, no residual filter: the retrieval scan itself
+        // is the complete matching set.
+        for (int64_t i = 0; can_skip && i < select_stmt->get_condition_size(); ++i) {
+          const ObRawExpr *condition = select_stmt->get_condition_expr(i);
+          can_skip = OB_NOT_NULL(condition) && condition->has_flag(CNT_MATCH_EXPR);
+        }
+      } else {
+        // A view whose rows are only counted projects no data-table column
+        // (see the COUNT-over-view rewrite in the pre-process transform).
+        can_skip = select_stmt->get_select_item_size() > 0;
+        for (int64_t i = 0; can_skip && i < select_stmt->get_select_item_size(); ++i) {
+          const ObRawExpr *item_expr = select_stmt->get_select_item(i).expr_;
+          can_skip = OB_NOT_NULL(item_expr) && item_expr->is_const_expr();
+        }
+      }
+      if (!can_skip) {
+      } else if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(
+                    get_optimizer_context().get_exec_ctx(),
+                    get_stmt(),
+                    match_against,
+                    need_calc_relevance,
+                    constraints))) {
+      } else if (!need_calc_relevance
+                 && OB_FAIL(append_array_no_dup(
+                       get_optimizer_context().get_query_ctx()->all_expr_constraints_,
+                       constraints))) {
+      }
     }
-    */
     tr_info.match_expr_ = match_against;
     tr_info.inv_idx_tid_ = inv_idx_tid;
     tr_info.fwd_idx_tid_ = fwd_idx_tid;

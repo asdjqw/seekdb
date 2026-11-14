@@ -501,6 +501,7 @@ STORAGE_UNITY_GROUPS = [
             "src/storage/fts/ob_beng_ft_parser.cpp",
             "src/storage/fts/ob_fts_doc_word_iterator.cpp",
             "src/storage/fts/ob_fts_parser_property.cpp",
+            "src/storage/fts/ob_ft_token_cache.cpp",
             "src/storage/fts/ob_fts_stop_word.cpp",
             "src/storage/fts/ob_fts_struct.cpp",
             "src/storage/fts/ob_ngram_ft_parser.cpp",

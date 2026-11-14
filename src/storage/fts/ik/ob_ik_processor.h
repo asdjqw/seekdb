@@ -77,12 +77,14 @@ private:
   int prepare_next_char();
 
   ObCollationType coll_type_;
+  const ObCharsetInfo *cs_;
   const char *fulltext_;
   int64_t fulltext_len_;
 
   int64_t cursor_;
   int64_t next_char_len_;
   ObFTCharUtil::CharType next_char_type_;
+  bool is_utf8mb4_;
 
   uint32_t handle_size_;
   bool is_smart_;

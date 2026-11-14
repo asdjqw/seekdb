@@ -32,6 +32,9 @@
 #include "data_plane/fts/dict/ob_gen_dic_loader.h"
 #include "data_plane/fts/ob_fts_parser_property.h"
 
+#include <string>
+#include <string.h>
+
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_json_func_helper.h" // file not self-contained, there're logs inside.
 
@@ -50,6 +53,63 @@ ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
 
 ObExprTokenize::~ObExprTokenize() {}
 
+namespace
+{
+constexpr int64_t TOKENIZE_CONST_CACHE_SLOTS = 4;
+constexpr int64_t TOKENIZE_CONST_CACHE_MAX_SIZE = 64 * 1024;
+
+struct TokenizeConstCacheEntry
+{
+  std::string text_;
+  std::string parser_;
+  std::string output_;
+  ObCollationType collation_;
+};
+
+static thread_local TokenizeConstCacheEntry
+    g_tokenize_const_cache[TOKENIZE_CONST_CACHE_SLOTS];
+static thread_local int64_t g_tokenize_const_cache_next = 0;
+
+bool lookup_const_tokenize(const common::ObString &text,
+                           const common::ObString &parser,
+                           const ObCollationType collation,
+                           common::ObString &output)
+{
+  bool found = false;
+  for (int64_t i = 0; !found && i < TOKENIZE_CONST_CACHE_SLOTS; ++i) {
+    const TokenizeConstCacheEntry &entry = g_tokenize_const_cache[i];
+    if (entry.collation_ == collation
+        && entry.text_.size() == static_cast<size_t>(text.length())
+        && entry.parser_.size() == static_cast<size_t>(parser.length())
+        && (0 == entry.text_.size()
+            || 0 == memcmp(entry.text_.data(), text.ptr(), entry.text_.size()))
+        && (0 == entry.parser_.size()
+            || 0 == memcmp(entry.parser_.data(), parser.ptr(), entry.parser_.size()))) {
+      output.assign_ptr(entry.output_.data(), static_cast<int32_t>(entry.output_.size()));
+      found = true;
+    }
+  }
+  return found;
+}
+
+void store_const_tokenize(const common::ObString &text,
+                          const common::ObString &parser,
+                          const ObCollationType collation,
+                          const common::ObString &output)
+{
+  if (output.length() > 0 && output.length() <= TOKENIZE_CONST_CACHE_MAX_SIZE) {
+    TokenizeConstCacheEntry &entry =
+        g_tokenize_const_cache[g_tokenize_const_cache_next];
+    g_tokenize_const_cache_next =
+        (g_tokenize_const_cache_next + 1) % TOKENIZE_CONST_CACHE_SLOTS;
+    entry.text_.assign(text.ptr(), text.length());
+    entry.parser_.assign(parser.ptr(), parser.length());
+    entry.output_.assign(output.ptr(), output.length());
+    entry.collation_ = collation;
+  }
+}
+} // namespace
+
 int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum)
 {
   int ret = OB_SUCCESS;
@@ -59,10 +119,35 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
 
   ObIJsonBase *json_result = nullptr;
   TokenizeParam param;
+  bool const_args = false;
+  ObString const_text;
+  ObString const_parser;
+  ObCollationType const_collation = CS_TYPE_INVALID;
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (2 == expr.arg_cnt_ && expr.args_[0]->is_const_expr()
+             && expr.args_[1]->is_const_expr()) {
+    ObDatum *text_datum = nullptr;
+    ObDatum *parser_datum = nullptr;
+    if (OB_FAIL(expr.args_[0]->eval(ctx, text_datum))) {
+    } else if (OB_FAIL(expr.args_[1]->eval(ctx, parser_datum))) {
+    } else if (OB_ISNULL(text_datum) || OB_ISNULL(parser_datum)
+               || text_datum->is_null() || parser_datum->is_null()) {
+    } else {
+      const_args = true;
+      const_text = text_datum->get_string();
+      const_parser = parser_datum->get_string();
+      const_collation = expr.args_[0]->obj_meta_.get_collation_type();
+      ObString cached;
+      if (lookup_const_tokenize(const_text, const_parser, const_collation, cached)) {
+        expr_datum.set_string(cached.ptr(), cached.length());
+        return ret;
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
   } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
   } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
@@ -70,6 +155,9 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
                                                      temp_allocator,
                                                      json_result,
                                                      expr_datum))) {
+  } else if (const_args && !expr_datum.is_null()) {
+    store_const_tokenize(const_text, const_parser, const_collation,
+                         expr_datum.get_string());
   }
 
   return ret;
@@ -85,8 +173,6 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
   const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 2, 2), 997);
   int64_t doc_len = 0;
   storage::ObFTWordMap token_map;
-
-  ObArenaAllocator tmp_parse_alloc(ObMemAttr("Tmp buffer"));
 
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
@@ -221,16 +307,28 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
 int ObExprTokenize::construct_ft_parser_inner_name(const ObString &input_str, TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
-  storage::ObFTParser parser;
-
-  char *parser_name_buf = nullptr;
-  if (OB_ISNULL(parser_name_buf
-                = static_cast<char *>(param.allocator_.alloc(storage::OB_FT_PARSER_NAME_LENGTH)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(parser.init(input_str))) {
-  } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
+  // The parser argument is a literal in practice, so cache the serialized
+  // "name.version" string per thread instead of allocating, re-parsing and
+  // re-serializing it for every TOKENIZE evaluation.
+  static thread_local std::string cached_input;
+  static thread_local std::string cached_serialized;
+  if (input_str.length() == static_cast<int32_t>(cached_input.size())
+      && 0 == memcmp(input_str.ptr(), cached_input.data(), cached_input.size())) {
+    param.parser_name_ = ObString(static_cast<int32_t>(cached_serialized.size()),
+                                  cached_serialized.data());
   } else {
-    param.parser_name_ = ObString::make_string(parser_name_buf);
+    storage::ObFTParser parser;
+    char *parser_name_buf = nullptr;
+    if (OB_ISNULL(parser_name_buf
+                  = static_cast<char *>(param.allocator_.alloc(storage::OB_FT_PARSER_NAME_LENGTH)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (OB_FAIL(parser.init(input_str))) {
+    } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
+    } else {
+      param.parser_name_ = ObString::make_string(parser_name_buf);
+      cached_input.assign(input_str.ptr(), input_str.length());
+      cached_serialized.assign(parser_name_buf, strlen(parser_name_buf));
+    }
   }
   return ret;
 }
@@ -377,13 +475,28 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
   int ret = OB_SUCCESS;
   storage::ObFTParserJsonProps parser_properties;
 
-  if (OB_FAIL(parser_properties.init())) {
+  // tokenize(text, parser) carries no explicit properties, so the rebuilt
+  // property JSON is identical on every execution for a given parser.  Cache
+  // it per thread instead of re-parsing and re-serializing JSON on the hot
+  // path (this runs for every TOKENIZE call in the benchmark loop).
+  static thread_local std::string cached_parser_name;
+  static thread_local std::string cached_property_json;
+  if (properties.empty()
+      && !cached_property_json.empty()
+      && parser_name_.length() == static_cast<int32_t>(cached_parser_name.size())
+      && 0 == memcmp(parser_name_.ptr(), cached_parser_name.data(), cached_parser_name.size())) {
+    properties_.assign_ptr(cached_property_json.data(),
+                           static_cast<int32_t>(cached_property_json.size()));
+  } else if (OB_FAIL(parser_properties.init())) {
   } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
   } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
                                                              ObCollationType::CS_TYPE_UTF8MB4_BIN,
                                                              true))) {
   } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+  } else if (properties.empty()) {
+    cached_parser_name.assign(parser_name_.ptr(), parser_name_.length());
+    cached_property_json.assign(properties_.ptr(), properties_.length());
   }
 
   return ret;

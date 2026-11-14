@@ -630,6 +630,14 @@ public:
                               const int64_t buf_size,
                               int64_t &char_len);
 
+  // Same as above for a caller that already resolved the collation. A tokenizer
+  // walks a document one character at a time with a fixed collation, so it can
+  // resolve once and skip the lookup on every character.
+  static int first_valid_char(const ObCharsetInfo *cs,
+                              const char *buf,
+                              const int64_t buf_size,
+                              int64_t &char_len);
+
   static int last_valid_char(const ObCollationType collation_type,
                              const char *buf,
                              const int64_t buf_size,

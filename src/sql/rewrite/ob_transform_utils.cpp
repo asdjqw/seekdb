@@ -12858,6 +12858,97 @@ int ObTransformUtils::inner_check_need_calc_match_score(ObExecContext *exec_ctx,
   return ret;
 }
 
+int ObTransformUtils::check_need_calc_match_score(ObExecContext *exec_ctx,
+                                                  const ObDMLStmt *stmt,
+                                                  ObRawExpr *match_expr,
+                                                  bool &need_calc,
+                                                  ObIArray<ObExprConstraint> &constraints)
+{
+  int ret = OB_SUCCESS;
+  need_calc = false;
+  if (OB_ISNULL(exec_ctx) || OB_ISNULL(stmt) || OB_ISNULL(match_expr)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (stmt->is_select_stmt()) {
+    const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(stmt);
+    for (int64_t i = 0; OB_SUCC(ret) && !need_calc
+         && i < select_stmt->get_select_item_size(); ++i) {
+      if (OB_FAIL(check_need_calc_match_score(exec_ctx,
+                                              select_stmt->get_select_item(i).expr_,
+                                              match_expr,
+                                              need_calc,
+                                              constraints))) {
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && !need_calc
+         && i < select_stmt->get_order_item_size(); ++i) {
+      if (OB_FAIL(check_need_calc_match_score(exec_ctx,
+                                              select_stmt->get_order_item(i).expr_,
+                                              match_expr,
+                                              need_calc,
+                                              constraints))) {
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && !need_calc
+         && i < select_stmt->get_group_expr_size(); ++i) {
+      if (OB_FAIL(check_need_calc_match_score(exec_ctx,
+                                              select_stmt->get_group_exprs().at(i),
+                                              match_expr,
+                                              need_calc,
+                                              constraints))) {
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && !need_calc
+         && i < select_stmt->get_having_expr_size(); ++i) {
+      if (OB_FAIL(check_need_calc_match_score(exec_ctx,
+                                              select_stmt->get_having_exprs().at(i),
+                                              match_expr,
+                                              need_calc,
+                                              constraints))) {
+      }
+    }
+  }
+  // The WHERE match itself is the predicate that selects documents; it does
+  // not consume the score.  Any other use of the match expression does.
+  for (int64_t i = 0; OB_SUCC(ret) && !need_calc
+       && i < stmt->get_condition_size(); ++i) {
+    const ObRawExpr *condition = stmt->get_condition_expr(i);
+    if (OB_ISNULL(condition)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (condition->has_flag(CNT_MATCH_EXPR)) {
+      // A MATCH under WHERE is a membership predicate; it does not consume a
+      // score. Only projections, ordering and grouping use the score.
+    } else if (OB_FAIL(inner_check_need_calc_match_score(exec_ctx,
+                                                         const_cast<ObRawExpr *>(condition),
+                                                         match_expr,
+                                                         need_calc,
+                                                         constraints))) {
+    }
+  }
+  return ret;
+}
+
+int ObTransformUtils::check_need_calc_match_score(ObExecContext *exec_ctx,
+                                                  ObRawExpr *expr,
+                                                  ObRawExpr *match_expr,
+                                                  bool &need_calc,
+                                                  ObIArray<ObExprConstraint> &constraints)
+{
+  int ret = OB_SUCCESS;
+  need_calc = false;
+  if (OB_ISNULL(expr) || OB_ISNULL(match_expr)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (expr == match_expr) {
+    // the score is selected, ordered or grouped
+    need_calc = true;
+  } else if (OB_FAIL(inner_check_need_calc_match_score(exec_ctx,
+                                                       expr,
+                                                       match_expr,
+                                                       need_calc,
+                                                       constraints))) {
+  }
+  return ret;
+}
+
 int ObTransformUtils::check_expr_eq_zero(ObExecContext *ctx,
                                          ObRawExpr *expr, 
                                          bool &eq_zero, 

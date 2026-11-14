@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "sql/resolver/ddl/ob_alter_table_resolver.h"
+#include "sql/engine/dml/ob_ai_column_dml.h"
 #include "sql/resolver/expr/ob_raw_expr_part_expr_checker.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -420,6 +421,52 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         case T_CONVERT_TO_CHARACTER: {
           alter_table_stmt->set_convert_to_character();
           if (OB_FAIL(resolve_convert_to_character(*action_node))) {
+          }
+          break;
+        }
+        case T_RETRY_AI_COLUMN: {
+          if (node.num_child_ > 1) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                           "combining AI COLUMN RETRY with another ALTER action");
+          } else if (action_node->num_child_ != 2
+                     || OB_ISNULL(action_node->children_)
+                     || OB_ISNULL(action_node->children_[0])) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            const ParseNode *col_ref = action_node->children_[0];
+            const ParseNode *name_node = NULL;
+            if (T_COLUMN_REF == col_ref->type_ && col_ref->num_child_ >= 3
+                && OB_NOT_NULL(col_ref->children_)) {
+              name_node = col_ref->children_[2];
+            } else {
+              name_node = col_ref;
+            }
+            if (OB_ISNULL(name_node) || OB_ISNULL(name_node->str_value_)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              const ObString col_name(static_cast<int32_t>(name_node->str_len_),
+                                      name_node->str_value_);
+              const ObColumnSchemaV2 *ai_col = table_schema_->get_column_schema(col_name);
+              ObString where_sql;
+              if (OB_NOT_NULL(action_node->children_[1])
+                  && OB_NOT_NULL(action_node->children_[1]->str_value_)) {
+                where_sql.assign_ptr(action_node->children_[1]->str_value_,
+                                     static_cast<int32_t>(action_node->children_[1]->str_len_));
+              }
+              if (OB_ISNULL(ai_col)
+                  || !ObAiColumnDml::is_ai_result_column(*table_schema_, *ai_col)) {
+                ret = OB_NOT_SUPPORTED;
+                LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                               "retrying a column that is not an AI column");
+              } else if (OB_FAIL(ObAiColumnDml::retry_column(*session_info_,
+                                                              *table_schema_,
+                                                              *ai_col,
+                                                              where_sql))) {
+              } else {
+                alter_table_stmt->set_skip_ddl_execute(true);
+              }
+            }
           }
           break;
         }
@@ -3457,11 +3504,51 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          } else if (ai_column_defs_.count() > 0) {
+            // AI COLUMN: append the three hidden bookkeeping columns right after
+            // the user visible result column. Their ids are assigned by the DDL
+            // service, so they are filled in after the statement finished.
+            int64_t ai_idx = -1;
+            for (int64_t k = 0; k < ai_column_defs_.count(); ++k) {
+              if (common::OB_INVALID_ID == ai_column_defs_.at(k).result_column_id_
+                  && 0 == ai_column_defs_.at(k).column_name_.compare(
+                             alter_column_schema.get_column_name_str())) {
+                ai_idx = k;
+                break;
+              }
+            }
+            if (ai_idx >= 0) {
+              ObAiColumnDef &ai_def = ai_column_defs_.at(ai_idx);
+              const char *ai_suffixes[3] = {AI_COLUMN_STATE_SUFFIX,
+                                            AI_COLUMN_REQUEST_SUFFIX,
+                                            AI_COLUMN_SPEC_SUFFIX};
+              for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+                AlterColumnSchema hidden_column;
+                ObString encoded_def;
+                const ObString suffix(static_cast<int32_t>(strlen(ai_suffixes[k])), ai_suffixes[k]);
+                if (OB_FAIL(build_ai_hidden_column(alter_column_schema.get_column_name_str(),
+                                                   suffix, common::OB_INVALID_ID, hidden_column))) {
+                } else if (0 == k && OB_FAIL(encode_ai_column_def(ai_def, *allocator_, encoded_def))) {
+                } else if (0 == k && OB_FAIL(hidden_column.set_comment(encoded_def))) {
+                } else {
+                  hidden_column.alter_type_ = OB_DDL_ADD_COLUMN;
+                  if (OB_FAIL(alter_table_stmt->add_column(hidden_column))) {
+                  }
+                }
+              }
+              if (OB_SUCC(ret)) {
+                ai_def.result_column_id_ = 0; // marks "hidden columns added, ids pending"
+              }
+            }
           }
         }
       }
     }
     add_column_cnt_++;
+  }
+  if (OB_SUCC(ret) && ai_column_defs_.count() > 0) {
+    if (OB_FAIL(alter_table_stmt->get_ai_column_defs().assign(ai_column_defs_))) {
+    }
   }
   return ret;
 }

@@ -42,6 +42,8 @@ int ObBEngFTParser::get_next_token(
   word_freq = 0;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
+  } else if (ascii_document_) {
+    ret = get_next_ascii_token(word, word_len, char_len, word_freq);
   } else if (OB_ISNULL(token_stream_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(token_stream_->get_next(token, token_freq))) {
@@ -52,12 +54,53 @@ int ObBEngFTParser::get_next_token(
   } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(token.len_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
+    // The token stream owns and reuses the buffer behind token.ptr_, while the
+    // word map keeps the returned pointer until the whole document is
+    // consumed.  Copy each token so later tokens cannot overwrite the words
+    // already collected (that produced corrupted terms and duplicate index
+    // rows).
     MEMCPY(buf, token.ptr_, token.len_);
     word = buf;
     word_len = token.len_;
     char_len = token.len_;
     word_freq = token_freq;
     LOG_DEBUG("succeed to add word", K(ObString(word_len, word)), K(word_freq));
+  }
+  return ret;
+}
+
+int ObBEngFTParser::get_next_ascii_token(
+    const char *&word,
+    int64_t &word_len,
+    int64_t &char_len,
+    int64_t &word_freq)
+{
+  int ret = OB_SUCCESS;
+  const auto alnum = [](const unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+  };
+  while (ascii_cursor_ < doc_.len_ && !alnum(doc_.ptr_[ascii_cursor_])) {
+    ++ascii_cursor_;
+  }
+  const uint32_t start = ascii_cursor_;
+  while (ascii_cursor_ < doc_.len_ && alnum(doc_.ptr_[ascii_cursor_])) {
+    ++ascii_cursor_;
+  }
+  const uint32_t length = ascii_cursor_ - start;
+  char *buf = nullptr;
+  if (0 == length) {
+    ret = OB_ITER_END;
+  } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(length)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    for (uint32_t i = 0; i < length; ++i) {
+      const char c = doc_.ptr_[start + i];
+      buf[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+    }
+    word = buf;
+    word_len = length;
+    char_len = length;
+    word_freq = 1;
   }
   return ret;
 }
@@ -76,7 +119,15 @@ int ObBEngFTParser::init(ObFTParserParam *param)
     analysis_ctx_.cs_ = param->cs_;
     analysis_ctx_.filter_stopword_ = false;
     analysis_ctx_.need_grouping_ = false;
-    if (OB_FAIL(english_analyzer_.init(analysis_ctx_, *param->allocator_))) {
+    ascii_cursor_ = 0;
+    ascii_document_ = CHARSET_UTF8MB4
+        == ObCharset::charset_type_by_coll(static_cast<ObCollationType>(param->cs_->number));
+    for (uint32_t i = 0; ascii_document_ && i < doc_.len_; ++i) {
+      ascii_document_ = static_cast<unsigned char>(doc_.ptr_[i]) < 0x80;
+    }
+    if (ascii_document_) {
+      is_inited_ = true;
+    } else if (OB_FAIL(english_analyzer_.init(analysis_ctx_, *param->allocator_))) {
     } else if (OB_FAIL(segment(doc_, token_stream_))) {
     } else if (OB_ISNULL(token_stream_)) {
       ret = OB_ERR_UNEXPECTED;
@@ -110,6 +161,8 @@ void ObBEngFTParser::reset()
   english_analyzer_.reset();
   doc_.reset();
   token_stream_ = nullptr;
+  ascii_cursor_ = 0;
+  ascii_document_ = false;
   is_inited_ = false;
 }
 

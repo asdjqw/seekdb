@@ -311,19 +311,38 @@ static int ob_strnncoll_utf8mb4(const ObCharsetInfo *cs,
   const unsigned char *se = src + srclen;
   const unsigned char *te = dst + dstlen;
   ObUnicaseInfo *uni_plane = cs->caseinfo;
+  // ASCII fast path: a byte below 0x80 is a complete UTF-8 character whose
+  // weight is a single lookup in page 0 of the case info, so both the decoder
+  // and the second level page walk can be skipped. Page 0 is hoisted out of the
+  // loop because the comparison of real text rarely leaves it.
+  const ObUnicaseInfoChar *ascii_page = NULL;
+  if (NULL != uni_plane && uni_plane->maxchar >= 0x7F) {
+    ascii_page = uni_plane->page[0];
+  }
+  const int lower_sort = (cs->state & OB_CS_LOWER_SORT) ? 1 : 0;
   while ( src < se && dst < te ) {
-    int s_res = ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
-    int t_res = ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
-    if ( s_res <= 0 || t_res <= 0 ) {
-      return bincmp_utf8mb4(src, se, dst, te);
-    }
-    ob_tosort_unicode(uni_plane, &src_wc, cs->state);
-    ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
-    if ( src_wc != dst_wc ) {
-      return src_wc > dst_wc ? 1 : -1;
+    if (OB_LIKELY(NULL != ascii_page && *src < 0x80 && *dst < 0x80)) {
+      const ob_wc_t l_wc = lower_sort ? ascii_page[*src].tolower : ascii_page[*src].sort;
+      const ob_wc_t r_wc = lower_sort ? ascii_page[*dst].tolower : ascii_page[*dst].sort;
+      if (l_wc != r_wc) {
+        return l_wc > r_wc ? 1 : -1;
+      }
+      ++src;
+      ++dst;
     } else {
-      src += s_res;
-      dst += t_res;
+      int s_res = ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
+      int t_res = ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
+      if ( s_res <= 0 || t_res <= 0 ) {
+        return bincmp_utf8mb4(src, se, dst, te);
+      }
+      ob_tosort_unicode(uni_plane, &src_wc, cs->state);
+      ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
+      if ( src_wc != dst_wc ) {
+        return src_wc > dst_wc ? 1 : -1;
+      } else {
+        src += s_res;
+        dst += t_res;
+      }
     }
   }
   return (int) (t_is_prefix ? (dst - te) : ((se - src) - (te - dst)));
@@ -381,19 +400,38 @@ static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
   ob_wc_t src_wc = 0, dst_wc = 0;
   const unsigned char *se= src + srclen, *te= dst + dstlen;
   ObUnicaseInfo *uni_plane= cs->caseinfo;
+  // ASCII fast path: a byte below 0x80 is a complete UTF-8 character whose
+  // weight is a single lookup in page 0 of the case info, so both the decoder
+  // and the second level page walk can be skipped. Page 0 is hoisted out of the
+  // loop because the comparison of real text rarely leaves it.
+  const ObUnicaseInfoChar *ascii_page = NULL;
+  if (NULL != uni_plane && uni_plane->maxchar >= 0x7F) {
+    ascii_page = uni_plane->page[0];
+  }
+  const int lower_sort = (cs->state & OB_CS_LOWER_SORT) ? 1 : 0;
   while ( src < se && dst < te ) {
-    int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
-    int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
-    if ( s_res <= 0 || t_res <= 0 ) {
-      return bincmp_utf8mb4(src, se, dst, te);
-    }
-    ob_tosort_unicode(uni_plane, &src_wc, cs->state);
-    ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
-    if ( src_wc != dst_wc ) {
-      return src_wc > dst_wc ? 1 : -1;
+    if (OB_LIKELY(NULL != ascii_page && *src < 0x80 && *dst < 0x80)) {
+      const ob_wc_t l_wc = lower_sort ? ascii_page[*src].tolower : ascii_page[*src].sort;
+      const ob_wc_t r_wc = lower_sort ? ascii_page[*dst].tolower : ascii_page[*dst].sort;
+      if (l_wc != r_wc) {
+        return l_wc > r_wc ? 1 : -1;
+      }
+      ++src;
+      ++dst;
     } else {
-      src +=s_res;
-      dst +=t_res;
+      int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
+      int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
+      if ( s_res <= 0 || t_res <= 0 ) {
+        return bincmp_utf8mb4(src, se, dst, te);
+      }
+      ob_tosort_unicode(uni_plane, &src_wc, cs->state);
+      ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
+      if ( src_wc != dst_wc ) {
+        return src_wc > dst_wc ? 1 : -1;
+      } else {
+        src +=s_res;
+        dst +=t_res;
+      }
     }
   }
   srclen = (size_t) (se-src);

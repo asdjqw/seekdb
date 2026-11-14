@@ -1579,8 +1579,21 @@ int ObMicroBlockEncoder::choose_encoder(const int64_t column_idx,
       }
     }
 
+    // Keep fixed 16-byte binary columns (fulltext and vector document ids)
+    // raw. Their values share a long common prefix, so string diff wins on
+    // stored bytes but makes batch decode rebuild every value from a template
+    // per row; the raw encoding only resolves the row offset and points the
+    // datum straight at the micro-block bytes.
+    bool raw_only_column = false;
+    {
+      const ObColDesc &raw_col_desc = cc.encoding_ctx_->col_descs_->at(column_idx);
+      raw_only_column = (ObVarcharType == raw_col_desc.col_type_.get_type()
+                         && CS_TYPE_BINARY == raw_col_desc.col_type_.get_collation_type()
+                         && 16 == cc.max_string_size_);
+    }
+
     bool string_diff_suitable = false;
-    if (OB_SUCC(ret) && try_more) {
+    if (OB_SUCC(ret) && try_more && !raw_only_column) {
       if (is_string_encoding_valid(sc) && cc.fix_data_size_ > 0) {
         if (cc.detected_encoders_[ObStringDiffEncoder::type_]) {
         } else if (OB_FAIL(try_encoder<ObStringDiffEncoder>(e, column_idx))) {
@@ -1600,7 +1613,7 @@ int ObMicroBlockEncoder::choose_encoder(const int64_t column_idx,
     }
 
     bool string_prefix_suitable = false;
-    if (OB_SUCC(ret) && try_more) {
+    if (OB_SUCC(ret) && try_more && !raw_only_column) {
       if (is_string_encoding_valid(sc)) {
         if (cc.detected_encoders_[ObStringPrefixEncoder::type_]) {
         } else if (OB_FAIL(try_encoder<ObStringPrefixEncoder>(e, column_idx))) {
@@ -1619,7 +1632,8 @@ int ObMicroBlockEncoder::choose_encoder(const int64_t column_idx,
       }
     }
 
-    if (OB_SUCC(ret) && try_more && !string_diff_suitable && !string_prefix_suitable) {
+    if (OB_SUCC(ret) && try_more && !string_diff_suitable && !string_prefix_suitable
+        && !raw_only_column) {
       if (is_string_encoding_valid(sc)) {
         if (cc.detected_encoders_[ObHexStringEncoder::type_]) {
         } else if (OB_FAIL(try_encoder<ObHexStringEncoder>(e, column_idx))) {

@@ -199,30 +199,59 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
     ObArray<int64_t> row_ids;
     ObString model_id;
     int64_t dim = 0;
+    bool has_dim = false;
     for (int64_t i = 0; OB_SUCC(ret) && i < batch_size; ++i) {
+      const ObDatum &model_datum = expr.args_[MODEL_IDX]->is_batch_result()
+          ? model_datums[i]
+          : expr.args_[MODEL_IDX]->locate_expr_datum(ctx);
+      const ObDatum &content_datum = expr.args_[CONTENT_IDX]->is_batch_result()
+          ? content_datums[i]
+          : expr.args_[CONTENT_IDX]->locate_expr_datum(ctx);
+      const ObDatum *dim_datum = OB_ISNULL(dim_datums)
+          ? nullptr
+          : (expr.args_[DIM_IDX]->is_batch_result()
+              ? &dim_datums[i]
+              : &expr.args_[DIM_IDX]->locate_expr_datum(ctx));
       if (skip.at(i) || eval_flags.at(i)) {
-      } else if (model_datums[i].is_null()) {
+      } else if (model_datum.is_null()) {
         ret = OB_INVALID_ARGUMENT;
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, model id is null");
         results[i].set_null();
         eval_flags.set(i);
-      } else if (content_datums[i].is_null()) {
+      } else if (content_datum.is_null()) {
         results[i].set_null();
         eval_flags.set(i);
       } else {
         if (model_id.empty()) {
-          model_id = model_datums[i].get_string();
+          model_id = model_datum.get_string();
+        } else if (model_id != model_datum.get_string()) {
+          // A single provider request has one model. Do not silently use the
+          // first row's model for subsequent rows.
+          ret = OB_INVALID_ARGUMENT;
+          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, batch contains multiple model ids");
         }
-        if (OB_NOT_NULL(dim_datums) && dim == 0 && !dim_datums[i].is_null()) {
-          dim = dim_datums[i].get_int();
+        if (OB_SUCC(ret) && OB_NOT_NULL(dim_datum) && !dim_datum->is_null()) {
+          const int64_t row_dim = dim_datum->get_int();
+          if (row_dim <= 0) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, dimension parameter must be a positive integer");
+          } else if (!has_dim) {
+            dim = row_dim;
+            has_dim = true;
+          } else if (dim != row_dim) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, batch contains multiple dimensions");
+          }
         }
-        if (OB_FAIL(contents.push_back(content_datums[i].get_string()))) {
-        } else if (OB_FAIL(row_ids.push_back(i))) {
+        if (OB_SUCC(ret)) {
+          if (OB_FAIL(contents.push_back(content_datum.get_string()))) {
+          } else if (OB_FAIL(row_ids.push_back(i))) {
+          }
         }
       }
     }
     if (OB_FAIL(ret) || contents.empty()) {
-    } else if (dim < 0) {
+    } else if (has_dim && dim <= 0) {
       ret = OB_INVALID_ARGUMENT;
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, dimension parameter must be a positive integer");
     } else {

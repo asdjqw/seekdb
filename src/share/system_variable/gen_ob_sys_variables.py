@@ -61,18 +61,18 @@ file_head_annotation = """/*
 """
 
 def parse_json(json_file_name):
-  json_file = open(json_file_name,'r')
+  json_file = open(json_file_name, 'r', encoding='utf-8')
   all_the_vars = json_file.read( )
   json_Dict = json.loads(all_the_vars)
-  filtered_json = filter(lambda d: 'placeholder' not in d[1] or d[1]['placeholder'] is False, json_Dict.iteritems())
+  filtered_json = filter(lambda d: 'placeholder' not in d[1] or d[1]['placeholder'] is False, json_Dict.items())
   filtered_dict = dict(filtered_json)
-  list_sorted_by_name= sorted(filtered_dict.iteritems(), key=lambda d:d[0].lower())
-  list_sorted_by_id= sorted(filtered_dict.iteritems(), key=lambda d:d[1]['id'])
+  list_sorted_by_name= sorted(filtered_dict.items(), key=lambda d:d[0].lower())
+  list_sorted_by_id= sorted(filtered_dict.items(), key=lambda d:d[1]['id'])
   json_file.close()
   return (json_Dict, list_sorted_by_name, list_sorted_by_id)
 
 def make_alias_file(pdir, alias_file_name, sorted_list):
-  alias_file =open(alias_file_name,'w')
+  alias_file = open(alias_file_name, 'w', encoding='utf-8')
   alias_file.write(file_head_annotation);
   suffix_idx = alias_file_name.find(".h")
   file_def_str = "OCEANBASE_" + pdir.replace("/", "_").upper() + "_" + alias_file_name[0 : suffix_idx].upper() + "_"
@@ -102,7 +102,7 @@ def make_alias_file(pdir, alias_file_name, sorted_list):
   return
 
 def make_head_file(pdir, head_file_name, sorted_list):
-  head_file = open(head_file_name,'w')
+  head_file = open(head_file_name, 'w', encoding='utf-8')
   head_file.write(file_head_annotation);
   suffix_idx = head_file_name.find(".h")
   file_def_str = "OCEANBASE_" + pdir.replace("/", "_").upper() + "_" + head_file_name[0 : suffix_idx].upper() + "_"
@@ -219,7 +219,7 @@ def make_type_value(type):
   return type_dict[type.strip()]
 
 def make_cpp_file(pdir, cpp_file_name, sorted_list):
-  cpp_file =  open(cpp_file_name,'w')
+  cpp_file = open(cpp_file_name, 'w', encoding='utf-8')
   cpp_file.write(file_head_annotation)
   cpp_file.write("#define USING_LOG_PREFIX SHARE\n")
   cpp_file.write("#include \"" + pdir + "/" + cpp_file_name.replace(".cpp", ".h") + "\"\n")
@@ -589,7 +589,7 @@ def write_sys_var_class(wfile, idx, sys_var_name, data_type, base_class, \
   wfile.write("};\n");
 
 def make_sys_var_class_type_h(pdir, filename, sorted_list):
-  wfile = open(filename, 'w')
+  wfile = open(filename, 'w', encoding='utf-8')
   wfile.write(file_head_annotation);
   suffix_idx = filename.find(".h")
   file_def_str = "OCEANBASE_" + pdir.replace("/", "_").upper() + "_" + filename[0 : suffix_idx].upper() + "_"
@@ -612,7 +612,7 @@ namespace share
 
 # ---- New: share metadata header (ObSysVarMeta) ----
 def make_sys_var_meta_h(pdir, filename, sorted_list):
-  wfile = open(filename, 'w')
+  wfile = open(filename, 'w', encoding='utf-8')
   wfile.write(file_head_annotation);
   suffix_idx = filename.find(".h")
   file_def_str = "OCEANBASE_" + pdir.replace("/", "_").upper() + "_" + filename[0 : suffix_idx].upper() + "_"
@@ -639,7 +639,7 @@ namespace share
 def make_sys_var_sql_h(pdir, filename, sorted_list):
   import os
   base_name = os.path.basename(filename)
-  wfile = open(filename, 'w')
+  wfile = open(filename, 'w', encoding='utf-8')
   wfile.write(file_head_annotation);
   suffix_idx = base_name.find(".h")
   file_def_str = "OCEANBASE_" + pdir.replace("/", "_").upper() + "_" + base_name[0 : suffix_idx].upper() + "_"
@@ -669,7 +669,7 @@ namespace sql
 
 # ---- New: share metadata cpp ----
 def make_sys_var_meta_cpp(pdir, filename, list_sorted_by_name, list_sorted_by_id):
-  wfile = open(filename, 'w')
+  wfile = open(filename, 'w', encoding='utf-8')
   wfile.write(file_head_annotation);
   wfile.write("#define USING_LOG_PREFIX SHARE\n")
   wfile.write("#include \"" + pdir + "/" + filename.replace(".cpp", ".h") + "\"\n")
@@ -836,7 +836,7 @@ const ObString ObSysVarMeta::get_sys_var_name_by_id(ObSysVarClassType sys_var_id
 def make_sys_var_sql_cpp(pdir, filename, list_sorted_by_name, list_sorted_by_id):
   import os
   base_name = os.path.basename(filename)
-  wfile = open(filename, 'w')
+  wfile = open(filename, 'w', encoding='utf-8')
   wfile.write(file_head_annotation);
   wfile.write("#define USING_LOG_PREFIX SQL_SESSION\n");
   wfile.write("#include \"" + pdir + "/" + base_name.replace(".cpp", ".h") + "\"\n")
