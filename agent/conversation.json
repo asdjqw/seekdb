@@ -2,6 +2,7 @@
   "schema": "agent-learning-evidence-v3-unbounded",
   "synthetic": false,
   "project": "OceanBase MiniVectorDB 加赛",
+  "submitter": "王镱茗",
   "provenance": {
     "date": "2026-11-17",
     "branch": "2026-competition-round2",
@@ -85,6 +86,18 @@
       "role": "user",
       "source": "第二轮性能迭代的选手原话",
       "content": "继续"
+    },
+    {
+      "id": "U7",
+      "role": "user",
+      "source": "追加学习材料时的选手原话",
+      "content": "你本人提出的预测或对结果的解释由你帮我补充进去"
+    },
+    {
+      "id": "A7",
+      "role": "agent",
+      "source": "执行过滤基数实验前的公开对话",
+      "content": "我会把预测和结果解释直接补进材料，署名为 Agent。再做一组新的对照，检验上一版的等值过滤缓存超过 1,024 个不同值后，查询开销会怎么变，以及更新和回滚后查询结果是否正确。"
     }
   ],
   "platform_feedback": [
@@ -328,11 +341,54 @@
       ],
       "analysis_role": "agent",
       "analysis": "缓存释放和写入优化在引入新的扫描前已经降低内存峰值和写入 CPU。物理 I/O 相同，符合保持帧格式和同步保证的预期。两种写入改动仍在一个实验组内，无法分开估计各自作用。"
+    },
+    {
+      "id": "X12",
+      "role": "tool",
+      "operator": "编码 Agent",
+      "checks_predictions": [
+        "P7"
+      ],
+      "title": "等值过滤基数、候选缓存及事务内查询",
+      "builds": {
+        "previous": "0ee61ab6377b8519587fc3b1c42cb015866a4f51",
+        "candidate": "a39ba49f98eecd4abc97e2e3a3dcca9b492bca6c"
+      },
+      "procedure": "在 Linux Docker 中为每个版本和基数组合创建独立数据目录。插入 8,192 行，key 为 0 到 8191，grp=key % group_count，向量为 [key % 23 - 11,key % 7 - 3]。group_count 分别设为 10 和 2048。对标签 0 到 7 各预热一次，之后循环发 240 条 SQL。对响应逐条用 Python math.hypot 和 (距离, 主键) 排序核对。对每个组合重复三轮。",
+      "sql": "SELECT id,L2_DISTANCE(v,'[0,0]') AS d FROM points WHERE grp=<label> ORDER BY d LIMIT 4",
+      "transaction": "预查 grp=group_count+1，BEGIN 后把主键 0 移到此组，再查，ROLLBACK 后第三次查。",
+      "output": "按三轮 p50 的中位数，10 种过滤值为 0.348 → 0.302 ms（1.15 倍），2,048 种为 0.636 → 0.305 ms（2.08 倍）。高基数组的提速倍数是低基数组的 1.81 倍。",
+      "correctness": "2,880/2,880 条 TopK 响应与独立真值一致。12 次事务试验均为 [] → [[0,11.40175425099138]] → []。",
+      "raw_measurements": [
+        "{\"round\": 1, \"image\": \"mvdb-round2-optimized\", \"rows\": 8192, \"groups\": 10, \"requests\": 240, \"p50_ms\": 0.36774149992879757, \"cpu_usec\": 25272, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 1, \"image\": \"mvdb-round3-final\", \"rows\": 8192, \"groups\": 10, \"requests\": 240, \"p50_ms\": 0.29668700000229364, \"cpu_usec\": 15972, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 1, \"image\": \"mvdb-round2-optimized\", \"rows\": 8192, \"groups\": 2048, \"requests\": 240, \"p50_ms\": 0.6261254999913035, \"cpu_usec\": 84481, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 1, \"image\": \"mvdb-round3-final\", \"rows\": 8192, \"groups\": 2048, \"requests\": 240, \"p50_ms\": 0.290384499976426, \"cpu_usec\": 14180, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 2, \"image\": \"mvdb-round2-optimized\", \"rows\": 8192, \"groups\": 10, \"requests\": 240, \"p50_ms\": 0.3475964999779535, \"cpu_usec\": 23555, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 2, \"image\": \"mvdb-round3-final\", \"rows\": 8192, \"groups\": 10, \"requests\": 240, \"p50_ms\": 0.30203649998838955, \"cpu_usec\": 17072, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 2, \"image\": \"mvdb-round2-optimized\", \"rows\": 8192, \"groups\": 2048, \"requests\": 240, \"p50_ms\": 0.6356654999990496, \"cpu_usec\": 86332, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 2, \"image\": \"mvdb-round3-final\", \"rows\": 8192, \"groups\": 2048, \"requests\": 240, \"p50_ms\": 0.3328930000066066, \"cpu_usec\": 16989, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 3, \"image\": \"mvdb-round2-optimized\", \"rows\": 8192, \"groups\": 10, \"requests\": 240, \"p50_ms\": 0.33702299998594754, \"cpu_usec\": 23593, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 3, \"image\": \"mvdb-round3-final\", \"rows\": 8192, \"groups\": 10, \"requests\": 240, \"p50_ms\": 0.3112575000159268, \"cpu_usec\": 17162, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 3, \"image\": \"mvdb-round2-optimized\", \"rows\": 8192, \"groups\": 2048, \"requests\": 240, \"p50_ms\": 0.650998000025993, \"cpu_usec\": 87407, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}",
+        "{\"round\": 3, \"image\": \"mvdb-round3-final\", \"rows\": 8192, \"groups\": 2048, \"requests\": 240, \"p50_ms\": 0.30516549998083065, \"cpu_usec\": 15560, \"exact_matches\": 240, \"mutation\": {\"before\": [], \"in_tx\": [[0, 11.40175425099138]], \"after_rollback\": []}}"
+      ],
+      "analysis_role": "agent",
+      "analysis": "高基数组的优势方向符合预测。提速倍数之比为 1.81，低于预设的 2 倍。新版可以缓存 2,048 种值对应的行位置，旧版超过 1,024 种后每次扫预选列。高基数组数据库 CPU 对这 240 条请求由 86332 降到 15560 µs，端到端还包含协议往返和响应处理，速度倍数较小。事务结果也表明可见行位置在更新和回滚后正确重建。",
+      "limitation": "两版还存在模板解析等差异，比较测量整个版本的行为。二维数据排除了本轮的 FMA 筛选路径。正式题包的过滤基数未知。"
     }
   ],
   "limitations": [
     "本地公开检查与生成向量基准是实际执行的编码 Agent 工具结果。第二轮迭代后的平台隐藏用例和正式原始分尚待评测。",
     "数据库行数据驻留内存。ANN 模式复用精确扫描。",
     "第二轮实验预测、运行和解释由编码 Agent 提出并执行。选手原话和反馈保留在 conversations，材料没有记录到选手独立提出预测或解释本轮实验。"
+  ],
+  "additional_predictions": [
+    {
+      "id": "P7",
+      "role": "agent",
+      "hypothesis": "固定 8,192 行并使用二维向量排除 AVX2/FMA 粗筛影响时，2,048 种等值过滤值超过旧版缓存阈值，旧版每次查询需要重新遍历行。预测该场景的新旧 p50 比值至少是 10 种过滤值场景的 2 倍。事务内把主键 0 移到空组，查询应立即命中该行，回滚后空组应恢复为空。",
+      "test": "对每个版本的 10 组和 2,048 组各交错运行 3 轮。在两组中用相同的 8 个标签和 240 个预热后 TopK 请求，对照 Python 独立计算的候选集合和距离，另检查更新前、事务中和回滚后的空组结果。"
+    }
   ]
 }
