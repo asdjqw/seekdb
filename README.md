@@ -84,7 +84,7 @@ python3 protocol_check/run.py --image minivectordb:latest --output protocol-resu
 
 ## 4. 存储、事务与恢复
 
-`/data/wal.v3` 保存追加式 redo 日志。每笔自动提交或显式事务对应一帧，帧头记录长度和 CRC32，帧体记录提交序号及操作。结构化数据使用 CPython marshal v4 编码，向量直接保存为 float32 字节串。写入后调用 fsync，完成后才确认提交。
+`/data/wal.v3` 保存追加式 redo 日志。每笔自动提交或显式事务对应一帧，帧头记录长度和 CRC32，帧体记录提交序号及操作。结构化数据使用 CPython marshal v4 编码，向量直接保存为 float32 字节串。数据库复用 WAL 写入句柄，每次追加在 fdatasync（或平台的 fsync）完成后才确认提交。已同步且完整的 WAL 页可以释放文件缓存，未对齐的尾页仍保留。
 
 `/data/snapshot.v3` 保存检查点。WAL 至少增长到 64 MiB，或达到更大的现有快照大小，才触发检查点。数据库分批写出表定义和行数据，同步临时文件并原子替换快照，同步目录后再截断 WAL。正常关闭时回滚未提交事务，已同步的 WAL 可以直接用于下次恢复。
 
@@ -95,21 +95,24 @@ python3 protocol_check/run.py --image minivectordb:latest --output protocol-resu
 ## 5. 向量检索
 
 - 精确模式先处理 `WHERE`，可复用普通列等值分组，再对候选向量计算距离。C 扩展引用行内已有的 float32 字节，在支持 AVX2 的 CPU 上用 SIMD 执行 float64 距离运算，有界堆按 `(距离, 主键)` 选出 TopK。
+- 支持 AVX2 和 FMA 的 CPU 可用 float32 快速估算距离。误差界能排除一定进不了 TopK 的候选，其他候选计算 float64 距离。极端值及舍入敏感的排序保留高精度计算。
 - 当舍入误差可能改变入选或排序时，使用扩展精度和补偿求和复算距离。
 - 事务内的写入、回滚及其他行变动会使候选缓存失效。ANN 模式复用精确扫描，`CREATE VECTOR INDEX` 的元数据随事务日志和检查点保存。
+- 简单的批量 `INSERT ... VALUES` 直接读取有类型的字面量，复用通用的类型检查和事务提交。重复的距离查询可复用语法模板，每次请求绑定自己的向量参数。
 
 ## 6. 附加验证
 
-在 Linux 上运行以下命令。`mvdb-baseline` 是提交 `0b1db0d` 的镜像，`minivectordb:latest` 是本版镜像。
+在 Linux 上运行以下命令。`mvdb-baseline` 是上一版提交 `0ee61ab` 的镜像，`minivectordb:latest` 是本版镜像。测试旧 JSON 格式迁移时使用 `0b1db0d` 的镜像。
 
 ```bash
 python3 verify/regression.py minivectordb:latest --legacy mvdb-baseline
-python3 verify/benchmark.py mvdb-baseline minivectordb:latest --rounds 3
+python3 verify/benchmark.py mvdb-baseline minivectordb:latest --rounds 3 --protocol-probe 100
+python3 verify/benchmark.py minivectordb:latest --rounds 1 --seed 91 --shuffle-keys --exponential --oracle-queries 1000
 ```
 
-基准生成 10,000 条 128 维向量，每批写入 100 条，执行 1,000 次 TopK 查询，其中一半带等值过滤。脚本检查所有返回行的数量、唯一性、过滤条件及距离，对其中 40 个查询独立全量计算真值，并检查重启后的向量值。输出包含端到端用时、容器峰值内存和数据文件大小。
+基准生成 10,000 条 128 维向量，每批写入 100 条，执行 1,000 次 TopK 查询，其中一半带等值过滤。脚本检查所有返回行的数量、排序、唯一性、过滤条件及距离，默认对 40 个查询独立全量计算真值，并检查重启后的向量值。输出包括有过滤和无过滤两组延迟、端到端用时、容器 CPU 时间、峰值内存、设备 I/O 和数据文件大小。
 
-本地 WSL2 Linux 容器通过官方握手和 20/20 个公开用例。相同负载三轮中位数为写入 2.57 s → 0.29 s，查询 2.17 s → 0.53 s，查询阶段峰值内存 70.9 MiB → 25.2 MiB。赛题的正式 E 以平台测量为准。
+本地 WSL2 Linux 容器通过官方握手和 20/20 个公开用例。`0ee61ab` 和本版交错测量的三轮中位数为写入 0.400 s → 0.345 s、查询 0.831 s → 0.684 s、查询阶段峰值内存 24.6 MiB → 21.1 MiB。另一组乱序主键和科学计数法输入通过了 1,000 个查询的独立全量真值校验。赛题的正式 E 以平台测量为准。
 
 ## 7. 已知限制
 

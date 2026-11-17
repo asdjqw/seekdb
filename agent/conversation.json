@@ -6,8 +6,8 @@
     "date": "2026-11-17",
     "branch": "2026-competition-round2",
     "baseline_commit": "0b1db0d60dde47e3957455f17fb3e00b04f7e6a9",
-    "scope": "记录此前选手发起赛题、本轮根据平台反馈迭代，以及编码 Agent 驱动的本地验证。保留与本题直接相关的原话和验证输出。已省略无关赛题、凭据以及未核实的历史技术摘要。",
-    "authorship": "role=user 为选手原话。role=agent 为编码 Agent 发言或署名的技术分析。role=tool 为编码 Agent 执行命令得到的输出摘录。平台原分由选手转述，优化和本地实验均由编码 Agent 完成。"
+    "scope": "记录选手发起赛题、两轮平台反馈及编码 Agent 在此基础上进行的本地验证。保留与本题直接相关的原话和验证输出。已省略无关赛题、凭据以及未核实的历史技术摘要。",
+    "authorship": "role=user 为选手原话。role=agent 为编码 Agent 发言、实验预测或署名的技术分析。role=tool 为编码 Agent 执行命令得到的输出摘录。平台原分来自选手转述。"
   },
   "conversations": [
     {
@@ -17,21 +17,27 @@
       "content": "完成新的试题赛题一：完成一个轻量向量数据库"
     },
     {
+      "id": "U4",
+      "role": "user",
+      "source": "首次实现后的选手原话",
+      "content": "ywx-sss/seekdb是另一个队伍的参考，不要剽窃！"
+    },
+    {
       "id": "U2",
       "role": "user",
-      "source": "本轮选手原话",
+      "source": "首轮性能迭代前的选手原话",
       "content": "这是之前的工作，现在的问题是，轻量向量数据库的跑分很低性能评测完成；原始指标 E = 578.767946。Agent Prompt评测完成；原始分 = 0.000000。其他队伍E可以打到5000多分，prompt也重新写，尽可能提高得分，github仓库在以往交互记录里有"
     },
     {
       "id": "A1",
       "role": "agent",
-      "source": "本轮公开对话",
+      "source": "首轮性能迭代的公开对话",
       "content": "源码里有两个明显的开销。带过滤的查询先算全表距离，再丢掉不匹配的行。写入则把 float32 向量展开成 JSON 小数，同一批数据还会经过 WAL 和快照重复写入。我会保留已通过准入的 SQL 和事务入口，替换这两条路径，并在同一台机器上做前后对照。"
     },
     {
       "id": "A2",
       "role": "agent",
-      "source": "本轮向选手提供的实验讨论入口",
+      "source": "首轮性能迭代向选手提供的实验讨论入口",
       "content": "Agent Prompt 评审只给你本人有证据的理解和验证计分。你希望优先验证哪个边界？请用自己的话说说预期结果、为什么，以及出现什么结果会让你改变判断。",
       "topics": [
         "等值过滤和 TopK 并列时，哪些主键应该入选？",
@@ -42,21 +48,101 @@
     {
       "id": "U3",
       "role": "user",
-      "source": "本轮选手原话",
+      "source": "首轮性能迭代的选手原话",
       "content": "继续"
     },
     {
       "id": "A3",
       "role": "agent",
-      "source": "本轮公开对话",
+      "source": "首轮性能迭代的公开对话",
       "content": "边界测试发现，初版 SIMD 在同一组坐标换序时可能产生几个末位的距离差，使本应并列的向量按错误顺序入选。我已加上近距离重算，再用主键分出先后。旧版数据迁移和强杀后继续提交的回归已通过，接下来会复测这个修正的性能影响。"
+    },
+    {
+      "id": "U5",
+      "role": "user",
+      "source": "第二轮性能迭代前的选手原话",
+      "content": "性能性能评测完成；原始指标 E = 2722.130610，尽可能提升。prompt依然0分，你帮我加上实验预测和结果解释吧，全部做完"
+    },
+    {
+      "id": "A4",
+      "role": "agent",
+      "source": "第二轮性能迭代的公开对话",
+      "content": "我会接着优化 E=2722.130610 的版本，用同机对照逐项验证提速。Agent Prompt 里会补上真实执行的实验、预测和结果解释，并标明来源。评审只给选手本人的学习证据计分，你用自己的话给出的判断也可以一起纳入。"
+    },
+    {
+      "id": "A5",
+      "role": "agent",
+      "source": "第二轮性能迭代向选手提供的实验讨论入口",
+      "content": "想补一条能归到你本人的学习证据，可以选你感兴趣的实验，用一句话写出预测和依据。我会继续跑实验。",
+      "topics": [
+        "在等值过滤只剩约 10% 候选时，比较有过滤和无过滤两组的提速幅度",
+        "提交已经返回成功后立即强杀，比较旧 WAL 和精简 WAL 的恢复结果",
+        "用几个 float32 极端值制造距离相等的行，检查优化后是否仍按主键入选"
+      ]
+    },
+    {
+      "id": "U6",
+      "role": "user",
+      "source": "第二轮性能迭代的选手原话",
+      "content": "继续"
+    }
+  ],
+  "platform_feedback": [
+    {
+      "source_record": "U2",
+      "reported_performance_E": 578.767946,
+      "reported_agent_prompt_score": 0
+    },
+    {
+      "source_record": "U5",
+      "tested_commit": "0ee61ab6377b8519587fc3b1c42cb015866a4f51",
+      "reported_performance_E": 2722.13061,
+      "reported_agent_prompt_score": 0
     }
   ],
   "context": {
     "protocol": "题包通过 stdin/stdout JSON Lines 单客户端逐条提交 SQL。精确查询先过滤 WHERE，再取 L2 距离最小的 K 个主键，距离并列按主键升序。已响应成功的提交必须在进程强杀后恢复，未提交事务必须完全回滚。",
     "comparison": "本地基准为 10,000 行 × 128 维，每批 100 行，1,000 个 TopK=10，半数含普通列等值条件。老版与新版用相同数据和容器配额，基准自行用 float32 舍入和 math.dist 算独立真值。",
-    "evidence_gap": "本轮可核对的选手贡献是提供平台原始反馈、用竞争队伍的 E 比较差距并确定双目标。材料范围内没有记录到选手本人给出边界预测、执行对照实验或反馈实验解释。"
+    "participant_contribution": "选手规定独立实现，提供两次平台反馈，用其他队伍的 E 判断仍有改进空间，并要求增加实验预测与结果解释。"
   },
+  "predictions_before_second_iteration": [
+    {
+      "id": "P1",
+      "role": "agent",
+      "hypothesis": "缩减每个候选向量的精算成本后，无过滤查询应有更大的绝对提速。等值过滤后候选通常更少，SQL/JSON 解析和管道往返占比更高。",
+      "test": "同机对照上个提交和候选版本，独立记录有过滤、无过滤两组的端到端延迟，同时对照精确真值。用并列距离、极大值、次正规数以及非 SIMD 整倍数维度测试回退。"
+    },
+    {
+      "id": "P2",
+      "role": "agent",
+      "hypothesis": "如果类型明确的多行 INSERT 可以直接解析为行，减少中间 SQL 对象和数据复制，那么相同输入的数据库进程 CPU 时间和批量写入耗时应下降。相同磁盘格式下，设备 I/O 不一定会随时间下降。",
+      "test": "对照成功批次的值、确认行数和写入耗时，再用 BIGINT 溢出、float32 溢出、引号转义和批次尾行失败测试回退及语句原子性。重新打开并核对已提交向量。"
+    },
+    {
+      "id": "P3",
+      "role": "agent",
+      "hypothesis": "原生扫描变快以后，端到端收益可能小于算子收益。差距能反映解析、结果编码和 stdin/stdout 请求响应开销。",
+      "test": "把数据库进程内距离扫描和端到端 TopK 分开计时，再用 SELECT 1 测量协议和最小 SQL 执行的用时。公开基准与微基准各自保留原始单位。"
+    },
+    {
+      "id": "P4",
+      "role": "agent",
+      "hypothesis": "行已经驻留内存时，对已同步的完整 WAL 页释放文件缓存应降低容器 memory.peak，设备 I/O 可能近似不变。若释放范围覆盖后续提交会继续写的尾页，重读和重写可能反而抬高写入成本。",
+      "test": "在相同容器配额下比较 memory.peak、设备字节数与提交用时。用已确认提交、未提交修改和人工加入的残帧分别检查恢复后的可见行，并验证恢复后仍能提交。"
+    },
+    {
+      "id": "P5",
+      "role": "agent",
+      "hypothesis": "常用单个 L2 距离参数的查询复用语法结构后，数据库进程会减少重复解析。此前绑定的查询向量不应改变下一个请求的命中结果。",
+      "test": "对同一个 SELECT 结构交替发送两个查询向量，用另算的 math.dist 验证完整排序。再使用乱序主键和科学计数法，比较两版的服务 CPU 及端到端开销。"
+    },
+    {
+      "id": "P6",
+      "role": "agent",
+      "hypothesis": "随机 float32 的低位熵高，通用压缩可缩短 WAL 样本但会消耗编码时间。重复值分布的压缩率可能更高，与均匀向量结果应分别观察。",
+      "test": "生成三种数值分布的成批向量，比较 zlib 与 Zstandard 的编码时间和输出字节数后决定是否修改持久化格式。"
+    }
+  ],
   "experiments": [
     {
       "id": "X1",
@@ -111,10 +197,142 @@
       "analysis_role": "agent",
       "analysis": "保留 float32 位表示可验证二进制恢复结果。差值进入 float64 再计算，允许计算出大于 float32 最大值的有限距离。",
       "command": "python3 verify/regression.py mvdb-round2-optimized --legacy mvdb-round2-baseline"
+    },
+    {
+      "id": "X5",
+      "prediction_ids": [
+        "P1",
+        "P3"
+      ],
+      "role": "tool",
+      "operator": "编码 Agent",
+      "title": "基线的过滤分组和轻量 SQL 对照",
+      "command": "python3 verify/benchmark.py mvdb-round2-optimized --rounds 3 --protocol-probe 300",
+      "output": "三轮中位数：SELECT 1 p50 0.334905 ms，等值过滤 TopK p50 0.599490 ms，无过滤 TopK p50 0.999957 ms。1,000 次 TopK 合计墙钟 0.851385 s，cgroup CPU 438866 µs。每轮独立检查 40 个 TopK 的完整真值。",
+      "analysis_role": "agent",
+      "analysis": "扫描全表比过滤后扫描更多行，两组 p50 的差距为检索成本提供参考。SELECT 1 反映轻量请求在相同进程和协议下也有往返延迟，其结果更小且执行流程不同。它既不能直接从 TopK 时间中扣除，也不能单独解释墙钟与 CPU 的差值。上一轮 X1 的查询耗时来自不同测量批次。评估这轮改动应以本轮同条件对照为准。"
+    },
+    {
+      "id": "X6",
+      "role": "tool",
+      "operator": "编码 Agent",
+      "checks_predictions": [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5"
+      ],
+      "title": "上一版与最终镜像交错执行三轮",
+      "command": "python3 verify/benchmark.py mvdb-round2-optimized mvdb-round3-final --rounds 3 --protocol-probe 100",
+      "output": "写入 0.399583 → 0.344774 s，TopK 查询 0.831328 → 0.683943 s，写入容器 CPU 154615 → 115956 µs，查询容器 CPU 433114 → 306136 µs，查询阶段容器内存峰值 25825280 → 22122496 字节。均为三轮中位数。",
+      "output_split": "有过滤 TopK p50 0.588534 → 0.500159 ms，无过滤 p50 0.981029 → 0.777188 ms。写入阶段设备 I/O 5742592 → 5738496 字节，持久文件大小均为 5326461 字节。",
+      "raw_benchmark_lines": [
+        "{\"image\": \"mvdb-round2-optimized\", \"round\": 1, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.6207639319999885, \"write_s\": 0.40817160599999625, \"query_s\": 0.8170085820000281, \"shutdown_s\": 0.5395317949999594, \"reopen_s\": 0.7056435849999616, \"write_peak_bytes\": 25825280, \"query_peak_bytes\": 25825280, \"write_device_io_bytes\": 5742592, \"query_device_io_bytes\": 5746688, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 154615, \"query_cpu_usec\": 421947, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.037411549999831095, \"protocol_probe_p50_ms\": 0.3494879999834666, \"protocol_probe_p95_ms\": 0.546421000024111, \"write_requests\": 100, \"write_request_s\": 0.4078090290000773, \"write_p50_ms\": 4.0373229999772775, \"write_p95_ms\": 4.9601009999946655, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.31121282499998415, \"filtered_query_p50_ms\": 0.5843625000352404, \"filtered_query_p95_ms\": 0.9157979999940835, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.5047832639985472, \"unfiltered_query_p50_ms\": 0.9810294999965663, \"unfiltered_query_p95_ms\": 1.5330599999856531, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+        "{\"image\": \"mvdb-round3-final\", \"round\": 1, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.6827149810000037, \"write_s\": 0.3689360669999928, \"query_s\": 0.7917576209999879, \"shutdown_s\": 0.490946517999987, \"reopen_s\": 0.7317411429999652, \"write_peak_bytes\": 21860352, \"query_peak_bytes\": 21860352, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 119075, \"query_cpu_usec\": 350199, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.0361915530000374, \"protocol_probe_p50_ms\": 0.339957499988941, \"protocol_probe_p95_ms\": 0.5138960000294901, \"write_requests\": 100, \"write_request_s\": 0.36870104600035347, \"write_p50_ms\": 3.64453700001377, \"write_p95_ms\": 4.669864000049984, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.3069951789990455, \"filtered_query_p50_ms\": 0.53336550001859, \"filtered_query_p95_ms\": 1.0979070000303182, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.4835251559997005, \"unfiltered_query_p50_ms\": 0.84804499999791, \"unfiltered_query_p95_ms\": 1.681064999957016, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+        "{\"image\": \"mvdb-round2-optimized\", \"round\": 2, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.7425154669999756, \"write_s\": 0.3995825409999725, \"query_s\": 0.8415573159999781, \"shutdown_s\": 0.42298118600001544, \"reopen_s\": 0.6318789900000183, \"write_peak_bytes\": 25493504, \"query_peak_bytes\": 25493504, \"write_device_io_bytes\": 5742592, \"query_device_io_bytes\": 5746688, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 155221, \"query_cpu_usec\": 436522, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.03732197100043777, \"protocol_probe_p50_ms\": 0.3552275000231475, \"protocol_probe_p95_ms\": 0.5200510000236136, \"write_requests\": 100, \"write_request_s\": 0.39936011399993276, \"write_p50_ms\": 3.9425584999719376, \"write_p95_ms\": 4.674768000029417, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.31730907499957084, \"filtered_query_p50_ms\": 0.600605999977688, \"filtered_query_p95_ms\": 0.9296979999930954, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.5231914490004783, \"unfiltered_query_p50_ms\": 0.9832294999796432, \"unfiltered_query_p95_ms\": 1.6885370000068178, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+        "{\"image\": \"mvdb-round3-final\", \"round\": 2, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.5719979950000038, \"write_s\": 0.3447737700000175, \"query_s\": 0.6839433310000231, \"shutdown_s\": 0.5236116999999467, \"reopen_s\": 0.6404604289999725, \"write_peak_bytes\": 22282240, \"query_peak_bytes\": 22282240, \"write_device_io_bytes\": 5742592, \"query_device_io_bytes\": 5746688, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 108996, \"query_cpu_usec\": 306136, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.0361536699995213, \"protocol_probe_p50_ms\": 0.33691949997205484, \"protocol_probe_p95_ms\": 0.49355200002310085, \"write_requests\": 100, \"write_request_s\": 0.3445656309998526, \"write_p50_ms\": 3.376581499992426, \"write_p95_ms\": 4.276173999983257, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.2667408240001805, \"filtered_query_p50_ms\": 0.5001590000119904, \"filtered_query_p95_ms\": 0.7860929999878863, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.4162044980005817, \"unfiltered_query_p50_ms\": 0.7771880000007059, \"unfiltered_query_p95_ms\": 1.3900319999606836, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+        "{\"image\": \"mvdb-round2-optimized\", \"round\": 3, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.627192703999981, \"write_s\": 0.3898800709999932, \"query_s\": 0.8313275500000259, \"shutdown_s\": 0.5176194489999943, \"reopen_s\": 0.6656531710000309, \"write_peak_bytes\": 26120192, \"query_peak_bytes\": 26120192, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 151992, \"query_cpu_usec\": 433114, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.038282832000220424, \"protocol_probe_p50_ms\": 0.3523439999923994, \"protocol_probe_p95_ms\": 0.582876999999371, \"write_requests\": 100, \"write_request_s\": 0.3896726650000346, \"write_p50_ms\": 3.8523830000087855, \"write_p95_ms\": 4.778567000016665, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.3179876529996477, \"filtered_query_p50_ms\": 0.5885340000020278, \"filtered_query_p95_ms\": 0.9721520000312012, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.5123324890004142, \"unfiltered_query_p50_ms\": 0.9805610000341858, \"unfiltered_query_p95_ms\": 1.568812999948932, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+        "{\"image\": \"mvdb-round3-final\", \"round\": 3, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.7127847159999874, \"write_s\": 0.34389363999997613, \"query_s\": 0.6646241530000339, \"shutdown_s\": 0.5433962509999901, \"reopen_s\": 0.727984733000028, \"write_peak_bytes\": 22122496, \"query_peak_bytes\": 22122496, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 115956, \"query_cpu_usec\": 293843, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.03605826099982323, \"protocol_probe_p50_ms\": 0.34135750001951237, \"protocol_probe_p95_ms\": 0.596373999997013, \"write_requests\": 100, \"write_request_s\": 0.343678385000203, \"write_p50_ms\": 3.42228450000448, \"write_p95_ms\": 4.187591000004431, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.26108661400087385, \"filtered_query_p50_ms\": 0.48398300000940253, \"filtered_query_p95_ms\": 0.7792669999844293, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.40264342500051953, \"unfiltered_query_p50_ms\": 0.755209999994122, \"unfiltered_query_p95_ms\": 1.2931490000482881, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+        "{\"image\": \"mvdb-round2-optimized\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.627192703999981, \"write_s\": 0.3995825409999725, \"query_s\": 0.8313275500000259, \"shutdown_s\": 0.5176194489999943, \"reopen_s\": 0.6656531710000309, \"write_peak_bytes\": 25825280, \"query_peak_bytes\": 25825280, \"write_device_io_bytes\": 5742592, \"query_device_io_bytes\": 5746688, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 154615, \"query_cpu_usec\": 433114, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.037411549999831095, \"protocol_probe_p50_ms\": 0.3523439999923994, \"protocol_probe_p95_ms\": 0.546421000024111, \"write_requests\": 100, \"write_request_s\": 0.39936011399993276, \"write_p50_ms\": 3.9425584999719376, \"write_p95_ms\": 4.778567000016665, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.31730907499957084, \"filtered_query_p50_ms\": 0.5885340000020278, \"filtered_query_p95_ms\": 0.9296979999930954, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.5123324890004142, \"unfiltered_query_p50_ms\": 0.9810294999965663, \"unfiltered_query_p95_ms\": 1.568812999948932, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}",
+        "{\"image\": \"mvdb-round3-final\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.6827149810000037, \"write_s\": 0.3447737700000175, \"query_s\": 0.6839433310000231, \"shutdown_s\": 0.5236116999999467, \"reopen_s\": 0.727984733000028, \"write_peak_bytes\": 22122496, \"query_peak_bytes\": 22122496, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 115956, \"query_cpu_usec\": 306136, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.0361536699995213, \"protocol_probe_p50_ms\": 0.339957499988941, \"protocol_probe_p95_ms\": 0.5138960000294901, \"write_requests\": 100, \"write_request_s\": 0.3445656309998526, \"write_p50_ms\": 3.42228450000448, \"write_p95_ms\": 4.276173999983257, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.2667408240001805, \"filtered_query_p50_ms\": 0.5001590000119904, \"filtered_query_p95_ms\": 0.7860929999878863, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.4162044980005817, \"unfiltered_query_p50_ms\": 0.7771880000007059, \"unfiltered_query_p95_ms\": 1.3900319999606836, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}"
+      ],
+      "analysis_role": "agent",
+      "analysis": "无过滤组 p50 绝对降幅约 0.204 ms，大于有过滤组的 0.088 ms，符合扫描成本在全表组占比更大的预测。最小 SELECT 1 的 p50 约 0.34 ms，固定开销解释了为什么数据库查询 CPU 下降约 29% 而端到端只下降约 18%。峰值内存下降且同量写入的物理 I/O 几乎相同。批量字面量解析与 WAL 句柄调整同时进入该对照，不能从总写入降幅推出某一项的独立贡献。",
+      "limitation": "本机同组交错比较可重复，跨组绝对耗时受 WSL 调度影响。重启中位数 0.665653 → 0.727985 s，没有观察到重启提速。"
+    },
+    {
+      "id": "X7",
+      "role": "tool",
+      "operator": "编码 Agent",
+      "checks_predictions": [
+        "P1",
+        "P3"
+      ],
+      "title": "只测 C 距离算子和对照真值",
+      "command": "bash ../check/kernel-test.sh",
+      "output": "Differential results checked against Python math.dist: 640\n10k x 128, 1000 x TopK(10), 50% filtered:\nprevious [0.10048, 0.093486, 0.094868, 0.097574, 0.093087] median 0.09486809099999505\ncandidate [0.056212, 0.056048, 0.055513, 0.052753, 0.054073] median 0.05551284999998529",
+      "analysis_role": "agent",
+      "analysis": "只有误差范围外的候选才能跳过精算，接近第 K 名门槛、估算溢出及特殊维度均有精确路径。640 项涵盖 ASC/DESC、过滤、并列、极大值和次正规值。单核进程内的算子提速高于整条 SQL 链路。",
+      "further_trial": "额外测量一次处理四行的 SIMD 版本。",
+      "further_output": "Differential results checked against Python math.dist: 640\n10k x 128, 1000 x TopK(10), 50% filtered:\nprevious [0.079727, 0.071011, 0.068332, 0.068643, 0.070323] median 0.07032336100002112\ncandidate [0.070068, 0.066372, 0.062023, 0.062052, 0.068386] median 0.06637224199999991",
+      "further_analysis": "这组同次对照中，单行与四行算子中位数约 70.3 ms 与 66.4 ms。整条查询只可能获得其中一小部分，最终保留逻辑更短的单行筛选。"
+    },
+    {
+      "id": "X8",
+      "role": "tool",
+      "operator": "编码 Agent",
+      "checks_predictions": [
+        "P1",
+        "P2",
+        "P5"
+      ],
+      "title": "迁移到乱序主键和科学计数法输入的整负载",
+      "command": "python3 verify/benchmark.py mvdb-round2-optimized mvdb-round3-final --rounds 1 --seed 91 --shuffle-keys --exponential --oracle-queries 1000",
+      "output": "两版分别通过 1000/1000 条独立全量 TopK 排序校验。单轮批量写入 0.593150 → 0.442994 s，查询 0.954794 → 0.738691 s。",
+      "raw_benchmark_lines": [
+        "{\"image\": \"mvdb-round2-optimized\", \"round\": 1, \"seed\": 91, \"shuffle_keys\": true, \"exponential\": true, \"startup_s\": 0.6936248750000118, \"write_s\": 0.5931500589999814, \"query_s\": 0.9547937870000283, \"shutdown_s\": 0.4721922780000227, \"reopen_s\": 0.691660086000013, \"write_peak_bytes\": 26968064, \"query_peak_bytes\": 26968064, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 270182, \"query_cpu_usec\": 545856, \"write_requests\": 100, \"write_request_s\": 0.5929161520003277, \"write_p50_ms\": 5.901986500020939, \"write_p95_ms\": 6.981525000014699, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.3187451729999111, \"filtered_query_p50_ms\": 0.6019775000254413, \"filtered_query_p95_ms\": 0.9332429999631131, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.6349825540004304, \"unfiltered_query_p50_ms\": 1.2450369999896793, \"unfiltered_query_p95_ms\": 1.9975189999854592, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}",
+        "{\"image\": \"mvdb-round3-final\", \"round\": 1, \"seed\": 91, \"shuffle_keys\": true, \"exponential\": true, \"startup_s\": 0.6695595520000097, \"write_s\": 0.4429939999999988, \"query_s\": 0.7386909759999867, \"shutdown_s\": 0.4615152609999882, \"reopen_s\": 0.7236807070000282, \"write_peak_bytes\": 23085056, \"query_peak_bytes\": 23085056, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 157328, \"query_cpu_usec\": 344261, \"write_requests\": 100, \"write_request_s\": 0.4427577540001266, \"write_p50_ms\": 4.393139499995868, \"write_p95_ms\": 5.283614000006764, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.27634618699971725, \"filtered_query_p50_ms\": 0.5145365000203128, \"filtered_query_p95_ms\": 0.8323010000026443, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.461356933999582, \"unfiltered_query_p50_ms\": 0.8653849999973318, \"unfiltered_query_p95_ms\": 1.490092000040022, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}",
+        "{\"image\": \"mvdb-round2-optimized\", \"seed\": 91, \"shuffle_keys\": true, \"exponential\": true, \"median\": {\"startup_s\": 0.6936248750000118, \"write_s\": 0.5931500589999814, \"query_s\": 0.9547937870000283, \"shutdown_s\": 0.4721922780000227, \"reopen_s\": 0.691660086000013, \"write_peak_bytes\": 26968064, \"query_peak_bytes\": 26968064, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 270182, \"query_cpu_usec\": 545856, \"write_requests\": 100, \"write_request_s\": 0.5929161520003277, \"write_p50_ms\": 5.901986500020939, \"write_p95_ms\": 6.981525000014699, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.3187451729999111, \"filtered_query_p50_ms\": 0.6019775000254413, \"filtered_query_p95_ms\": 0.9332429999631131, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.6349825540004304, \"unfiltered_query_p50_ms\": 1.2450369999896793, \"unfiltered_query_p95_ms\": 1.9975189999854592, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}}",
+        "{\"image\": \"mvdb-round3-final\", \"seed\": 91, \"shuffle_keys\": true, \"exponential\": true, \"median\": {\"startup_s\": 0.6695595520000097, \"write_s\": 0.4429939999999988, \"query_s\": 0.7386909759999867, \"shutdown_s\": 0.4615152609999882, \"reopen_s\": 0.7236807070000282, \"write_peak_bytes\": 23085056, \"query_peak_bytes\": 23085056, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 157328, \"query_cpu_usec\": 344261, \"write_requests\": 100, \"write_request_s\": 0.4427577540001266, \"write_p50_ms\": 4.393139499995868, \"write_p95_ms\": 5.283614000006764, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.27634618699971725, \"filtered_query_p50_ms\": 0.5145365000203128, \"filtered_query_p95_ms\": 0.8323010000026443, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.461356933999582, \"unfiltered_query_p50_ms\": 0.8653849999973318, \"unfiltered_query_p95_ms\": 1.490092000040022, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}}"
+      ],
+      "analysis_role": "agent",
+      "analysis": "变换种子、打乱主键插入顺序并改用科学计数法，验证查询模板代入和数值解析没有把最初的固定输入当成特例。新版在此单轮也加快，单轮幅度不能作为稳定排名预估。"
+    },
+    {
+      "id": "X9",
+      "role": "tool",
+      "operator": "编码 Agent",
+      "checks_predictions": [
+        "P2",
+        "P4",
+        "P5"
+      ],
+      "title": "官方公开题包和短格式 SQL、近边界、WAL 迁移恢复回归",
+      "command": "python3 protocol_check/run.py --image mvdb-round3-final --output ../check/round3-final-public\npython3 verify/regression.py mvdb-round3-final --legacy mvdb-round2-optimized\npython3 verify/regression.py mvdb-round3-final --legacy mvdb-round2-baseline",
+      "output": "官方握手 PASS，20/20 公开用例通过。早期 JSON 格式和上一版二进制格式的重启结果各自通过。",
+      "binary_result": "Recovery of snapshot/WAL from mvdb-round2-optimized: [[[16777216.0, 1.401298464324817e-45]]]\nFiltered TopK tie at K (ASC/DESC/ANN): [[3, 1.0], [6, 1.0]]\nExtreme float32 differences produce finite distances in exact order: [[3, 1.0000000694406173e+38], [2, 4.999999941554894e+38], [1, 6.0000000109955115e+38]]\nMixed-magnitude tie across SIMD and tail dimensions: [[1, 134217728.00000012]]\nPlain INSERT, parser fallback, rejected batches: [[-9223372036854775808, '甲,乙', [1.401298464324817e-45, 3.0]], [7, \"can't\", [2.0, 4.0]], [9, 'plain', [2.0, 4.0]]]\nNear-cutoff float32 scores, rebinding vector literal, filtered/unfiltered ASC/DESC: 8/8 PASS\nKill, partial WAL frame, reopen, commit, kill, reopen: [[-1, 0.0], [0, 0.0]]",
+      "legacy_result": "Recovery of snapshot/WAL from mvdb-round2-baseline: [[[16777216.0, 1.401298464324817e-45]]]\nFiltered TopK tie at K (ASC/DESC/ANN): [[3, 1.0], [6, 1.0]]\nExtreme float32 differences produce finite distances in exact order: [[3, 1.0000000694406173e+38], [2, 4.999999941554894e+38], [1, 6.0000000109955115e+38]]\nMixed-magnitude tie across SIMD and tail dimensions: [[1, 134217728.00000012]]\nPlain INSERT, parser fallback, rejected batches: [[-9223372036854775808, '甲,乙', [1.401298464324817e-45, 3.0]], [7, \"can't\", [2.0, 4.0]], [9, 'plain', [2.0, 4.0]]]\nNear-cutoff float32 scores, rebinding vector literal, filtered/unfiltered ASC/DESC: 8/8 PASS\nKill, partial WAL frame, reopen, commit, kill, reopen: [[-1, 0.0], [0, 0.0]]",
+      "checkpoint_result": "Checkpoint publication, old WAL replay, new commit, reopen: [[2, [3.0, 4.0]], [3, [5.0, 6.0]]]",
+      "analysis_role": "agent",
+      "analysis": "数值和语法错误时，前面同批次的合法行也不能写进表。近阈值的八个查询用两个参数复用模板，并在有无过滤和两种方向比较独立真值。强杀后保留已确认事务，移除残帧后再提交的记录也能二次恢复。独立的检查点实验模拟快照已发布、WAL 尚未截断的窗口，再验证 LSN 过滤和重新追加。"
+    },
+    {
+      "id": "X10",
+      "role": "tool",
+      "operator": "编码 Agent",
+      "checks_predictions": [
+        "P6"
+      ],
+      "title": "二进制 WAL 样本压缩探针",
+      "command": "python3 ../check/wal-compress-probe.py",
+      "output": "uniform raw_rows zlib1 5290500 4845451 0.0978s\nuniform raw_rows zstd-1 5290500 5191199 0.0100s\nuniform raw_rows zstd1 5290500 4789770 0.0145s\nuniform vector_planes zlib1 5171700 4505822 0.0616s\nuniform vector_planes zstd-1 5171700 5032435 0.0049s\nuniform vector_planes zstd1 5171700 4725098 0.0079s\nsigned_gaussian raw_rows zlib1 5290500 4855247 0.0920s\nsigned_gaussian raw_rows zstd-1 5290500 5190987 0.0084s\nsigned_gaussian raw_rows zstd1 5290500 4803194 0.0143s\nsigned_gaussian vector_planes zlib1 5171700 4529223 0.0627s\nsigned_gaussian vector_planes zstd-1 5171700 5042454 0.0048s\nsigned_gaussian vector_planes zstd1 5171700 4739319 0.0073s\nrepeated raw_rows zlib1 5290500 2452444 0.0534s\nrepeated raw_rows zstd-1 5290500 3354667 0.0188s\nrepeated raw_rows zstd1 5290500 3032582 0.0203s\nrepeated vector_planes zlib1 5171700 3450994 0.0674s\nrepeated vector_planes zstd-1 5171700 5004442 0.0051s\nrepeated vector_planes zstd1 5171700 3778613 0.0072s",
+      "analysis_role": "agent",
+      "analysis": "均匀随机的 raw_rows 下，Zstandard level 1 只把 5290500 字节降到 4789770 字节，编码耗时 0.0145 s。重复值的可压缩性更好，当前主要目标负载的数据分布并不保证重复，因此保留持久化格式兼容，避免引入压缩依赖和额外 CPU。"
+    },
+    {
+      "id": "X11",
+      "role": "tool",
+      "operator": "编码 Agent",
+      "checks_predictions": [
+        "P2",
+        "P4"
+      ],
+      "title": "只替换 Python 写入路径和缓存管理，再加入原生算子筛选",
+      "command": "python3 verify/benchmark.py mvdb-round2-optimized mvdb-round3-storage mvdb-round3-candidate --rounds 3 --protocol-probe 100",
+      "output": "上一版、只改写入和缓存管理、再改原生筛选三组中位数的写入容器 CPU 分别为 117620、83190、86846 µs，查询峰值内存分别为 26243072、22110208、21852160 字节。三组写入阶段设备 I/O 均为 5738496 字节。",
+      "raw_medians": [
+        "{\"image\": \"mvdb-round2-optimized\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.44078210299998943, \"write_s\": 0.2902459139999962, \"query_s\": 0.506605522000001, \"shutdown_s\": 0.28739395400000944, \"reopen_s\": 0.475327398999994, \"write_peak_bytes\": 26243072, \"query_peak_bytes\": 26243072, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 117620, \"query_cpu_usec\": 223551, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.027651988999991772, \"protocol_probe_p50_ms\": 0.26563000000123793, \"protocol_probe_p95_ms\": 0.3534040000090499, \"write_requests\": 100, \"write_request_s\": 0.2901453739999056, \"write_p50_ms\": 2.849820500003375, \"write_p95_ms\": 3.537299000001326, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.21425226599987468, \"filtered_query_p50_ms\": 0.4126010000007341, \"filtered_query_p95_ms\": 0.5355349999973669, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.29172955600016337, \"unfiltered_query_p50_ms\": 0.56233200000122, \"unfiltered_query_p95_ms\": 0.7543859999969982, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}",
+        "{\"image\": \"mvdb-round3-storage\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.43212395199999776, \"write_s\": 0.24512725300000682, \"query_s\": 0.5086765929999899, \"shutdown_s\": 0.32414975599999707, \"reopen_s\": 0.4214956709999882, \"write_peak_bytes\": 22110208, \"query_peak_bytes\": 22110208, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 83190, \"query_cpu_usec\": 226394, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.027350839999968457, \"protocol_probe_p50_ms\": 0.25801049999785164, \"protocol_probe_p95_ms\": 0.37505499999213043, \"write_requests\": 100, \"write_request_s\": 0.24503299999990702, \"write_p50_ms\": 2.4071550000073216, \"write_p95_ms\": 2.9357880000020486, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.2128096389998575, \"filtered_query_p50_ms\": 0.4103840000055925, \"filtered_query_p95_ms\": 0.524083999991376, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.29524440699997, \"unfiltered_query_p50_ms\": 0.5653190000032282, \"unfiltered_query_p95_ms\": 0.7599070000026131, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}",
+        "{\"image\": \"mvdb-round3-candidate\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.5016279250000082, \"write_s\": 0.2592736459999969, \"query_s\": 0.48259176599999876, \"shutdown_s\": 0.3962079459999899, \"reopen_s\": 0.5025256649999932, \"write_peak_bytes\": 21852160, \"query_peak_bytes\": 21852160, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 86846, \"query_cpu_usec\": 194550, \"protocol_probe_requests\": 100, \"protocol_probe_request_s\": 0.027755346999924768, \"protocol_probe_p50_ms\": 0.25949399999802836, \"protocol_probe_p95_ms\": 0.36913100001356725, \"write_requests\": 100, \"write_request_s\": 0.25917561399992906, \"write_p50_ms\": 2.4661540000039395, \"write_p95_ms\": 3.084853000004273, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.2123699700000401, \"filtered_query_p50_ms\": 0.4110859999997274, \"filtered_query_p95_ms\": 0.5442719999990686, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.2695789540000675, \"unfiltered_query_p50_ms\": 0.5260519999978897, \"unfiltered_query_p95_ms\": 0.688421000006656, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}"
+      ],
+      "analysis_role": "agent",
+      "analysis": "缓存释放和写入优化在引入新的扫描前已经降低内存峰值和写入 CPU。物理 I/O 相同，符合保持帧格式和同步保证的预期。两种写入改动仍在一个实验组内，无法分开估计各自作用。"
     }
   ],
   "limitations": [
-    "本地公开检查与合成向量基准是实际执行的编码 Agent 工具结果。平台隐藏用例和新版 E、Agent Prompt 正式原始分尚待平台产生。",
-    "数据库行数据驻留内存。ANN 模式复用精确扫描。"
+    "本地公开检查与生成向量基准是实际执行的编码 Agent 工具结果。第二轮迭代后的平台隐藏用例和正式原始分尚待评测。",
+    "数据库行数据驻留内存。ANN 模式复用精确扫描。",
+    "第二轮实验预测、运行和解释由编码 Agent 提出并执行。选手原话和反馈保留在 conversations，材料没有记录到选手独立提出预测或解释本轮实验。"
   ]
 }

@@ -21,12 +21,14 @@ from __future__ import annotations
 import argparse
 import array
 import bisect
+import functools
 import heapq
 import itertools
 import json
 import marshal
 import math
 import os
+import re
 import struct
 import sys
 import zlib
@@ -95,6 +97,19 @@ class Token:
 
 
 _SYMBOLS = ("<=", ">=", "<>", "!=", "=", "<", ">", "(", ")", ",", ";", "*", ".")
+_SQL_SPACE = r"[ \t\r\n]*"
+_INSERT_VALUES = re.compile(
+    r"[ \t\r\n]*INSERT[ \t\r\n]+INTO[ \t\r\n]+([A-Za-z_][A-Za-z0-9_$]*)"
+    r"[ \t\r\n]+VALUES?[ \t\r\n]*(?=\()", re.IGNORECASE | re.ASCII
+)
+_QUOTED_LITERAL = r"""('[^'\\]*'|"[^"\\]*")"""
+_DISTANCE_LITERAL = re.compile(
+    r"""[ \t\r\n]*SELECT[ \t\r\n]+[^'"#;/\\\x60-]*\bL2_DISTANCE[ \t\r\n]*\( """
+    r"""[ \t\r\n]*[A-Za-z_][A-Za-z0-9_$]*[ \t\r\n]*,[ \t\r\n]*"""
+    r"""('\[[^'\\]*\]'(?!')|"\[[^"\\]*\]"(?!"))""",
+    re.IGNORECASE | re.ASCII | re.VERBOSE,
+)
+_DISTANCE_PARAMETER = object()
 
 
 def tokenize(sql: str) -> list[Token]:
@@ -568,6 +583,22 @@ class Parser:
         raise DBError("syntax_error", "expected expression")
 
 
+@functools.lru_cache(maxsize=64)
+def distance_select_template(prefix: str, suffix: str):
+    tokens = tokenize(prefix)
+    tokens.append(Token("string", _DISTANCE_PARAMETER))
+    tokens.extend(tokenize(suffix))
+    statement = Parser(tokens).parse()
+    # Only projections and ORDER BY bind the parameter. WHERE and other
+    # placements still use the full SQL parser.
+    if statement["type"] == "select":
+        for item in itertools.chain(statement["items"], statement["order"]):
+            expr = item["expr"]
+            if expr[0] == "l2" and expr[2] is _DISTANCE_PARAMETER:
+                return statement
+    return None
+
+
 # --------------------------------------------------------------------------
 # schema helpers
 # --------------------------------------------------------------------------
@@ -641,7 +672,8 @@ class Table:
         self.indexes: dict[str, str] = {}
         self._cache_pks = None
         self._scan = None
-        self._groups: dict[int, dict[Any, array.array] | None] = {}
+        self._groups: dict[int, dict[Any, int | array.array] | None] = {}
+        self._insert_pattern = None
 
     # -- schema -------------------------------------------------------
     def column_index(self, name: str) -> int:
@@ -672,6 +704,24 @@ class Table:
             row[self.vec_idx] = array.array("f", row[self.vec_idx]).tobytes()
         self.rows[row[self.pk_idx]] = row
 
+    def simple_insert_rows(self, sql, start):
+        if self._insert_pattern is None:
+            fields = [r"(-?[0-9]{1,19})" if column.type == "BIGINT" else _QUOTED_LITERAL
+                      for column in self.columns]
+            literals = (_SQL_SPACE + "," + _SQL_SPACE).join(fields)
+            self._insert_pattern = re.compile(
+                _SQL_SPACE + r"\(" + _SQL_SPACE + literals + _SQL_SPACE + r"\)" +
+                _SQL_SPACE + r"(,|;?" + _SQL_SPACE + r"\Z)"
+            )
+        rows = []
+        while match := self._insert_pattern.match(sql, start):
+            values = match.groups()
+            rows.append(values[:-1])
+            if values[-1] != ",":
+                return rows
+            start = match.end()
+        return None
+
     # -- vector cache -------------------------------------------------
     def vector_scan(self):
         if self._cache_pks is None:
@@ -692,17 +742,26 @@ class Table:
                 key = self.rows[pk][index]
                 group = groups.get(key)
                 if group is None:
-                    # Cap lookup overhead for high-cardinality columns.
-                    if len(groups) >= 1024:
+                    # Singletons need only a slot. Bound index metadata for
+                    # much larger tables with high-cardinality columns.
+                    if len(groups) >= 32_768:
                         groups = None
                         break
-                    groups[key] = group = array.array("I")
-                group.append(slot)
+                    groups[key] = slot
+                elif isinstance(group, int):
+                    groups[key] = array.array("I", [group, slot])
+                else:
+                    group.append(slot)
+            if len(self._groups) >= 4:
+                del self._groups[next(iter(self._groups))]
             self._groups[index] = groups
         groups = self._groups[index]
         if groups is None:
             return array.array("I", (i for i, pk in enumerate(pks) if self.rows[pk][index] == value))
-        return groups.get(value, array.array("I"))
+        group = groups.get(value)
+        if group is None:
+            return array.array("I")
+        return array.array("I", [group]) if isinstance(group, int) else group
 
     def touch(self) -> None:
         self._cache_pks = None
@@ -718,6 +777,7 @@ class Storage:
     WAL = "wal.v3"
     FRAME = struct.Struct("<QI")
     CHECKPOINT_BYTES = 64 * 1024 * 1024
+    CACHE_BATCH = 1024 * 1024
 
     def __init__(self, data_dir: str) -> None:
         self.data_dir = data_dir
@@ -727,6 +787,8 @@ class Storage:
         self.lsn = 0
         self.wal_bytes = 0
         self.checkpoint_bytes = self.CHECKPOINT_BYTES
+        self._writer = None
+        self._wal_cache_end = 0
 
     def load(self) -> dict[str, Table]:
         tables: dict[str, Table] = {}
@@ -734,11 +796,13 @@ class Storage:
             self.checkpoint_bytes = max(self.checkpoint_bytes, os.path.getsize(self.snapshot_path))
             with open(self.snapshot_path, "rb") as handle:
                 self.lsn, = struct.unpack("<Q", handle.read(8))
+                cache_end = 0
                 while True:
                     frame = self._read_frame(handle)
                     if frame is None:
                         break
                     apply_ops(tables, frame)
+                    cache_end = self._release_pages(handle, cache_end, handle.tell())
         else:
             self._import_legacy(tables)
         self._replay_wal(tables)
@@ -816,6 +880,8 @@ class Storage:
                 if lsn > self.lsn:
                     apply_ops(tables, ops)
                     self.lsn = lsn
+                self._wal_cache_end = self._release_pages(
+                    handle, self._wal_cache_end, handle.tell())
             self.wal_bytes = good_end
 
     # -- writes -------------------------------------------------------
@@ -830,19 +896,48 @@ class Storage:
         handle.flush()
         os.fsync(handle.fileno())
 
+    @classmethod
+    def _release_pages(cls, handle, start, end) -> int:
+        # Committed rows are already in memory. Keep the active tail cached,
+        # and release only completed ranges in this sequential log/checkpoint.
+        cache_end = end - end % cls.CACHE_BATCH
+        if cache_end <= start or not hasattr(os, "posix_fadvise"):
+            return start
+        try:
+            os.posix_fadvise(handle.fileno(), start, cache_end - start, os.POSIX_FADV_DONTNEED)
+        except OSError:
+            pass  # This cache hint is optional on filesystems without support.
+        return cache_end
+
     def append_commit(self, ops: list[dict[str, Any]]) -> None:
         lsn = self.lsn + 1
+        payload = marshal.dumps((lsn, ops), 4)
+        record = self.FRAME.pack(len(payload), zlib.crc32(payload)) + payload
         try:
-            first = not os.path.exists(self.wal_path)
-            with open(self.wal_path, "ab") as handle:
-                size = self._write_frame(handle, (lsn, ops))
-                self._sync(handle)
+            first = False
+            if self._writer is None:
+                first = not os.path.exists(self.wal_path)
+                self._writer = open(self.wal_path, "ab", buffering=0)
+            pending = memoryview(record)
+            while pending:
+                written = self._writer.write(pending)
+                if not written:
+                    raise OSError("incomplete WAL write")
+                pending = pending[written:]
+            getattr(os, "fdatasync", os.fsync)(self._writer.fileno())
             if first:
                 self._fsync_dir()
         except OSError as exc:
             raise StorageError("could not commit WAL record") from exc
-        self.wal_bytes += size
+        self.wal_bytes += len(record)
         self.lsn = lsn
+        self._wal_cache_end = self._release_pages(
+            self._writer, self._wal_cache_end, self.wal_bytes)
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
 
     def write_snapshot(self, tables: dict[str, Table]) -> None:
         try:
@@ -859,12 +954,14 @@ class Storage:
                 self._sync(handle)
             os.replace(tmp_path, self.snapshot_path)
             self._fsync_dir()
+            self.close()
             with open(self.wal_path, "wb") as handle:
                 self._sync(handle)
         except OSError as exc:
             raise StorageError("could not checkpoint database") from exc
         self.checkpoint_bytes = max(self.CHECKPOINT_BYTES, size)
         self.wal_bytes = 0
+        self._wal_cache_end = 0
 
     def _fsync_dir(self) -> None:
         try:
@@ -925,9 +1022,25 @@ class Database:
     def close(self) -> None:
         if self.in_txn:
             self.rollback()
+        self.storage.close()
 
     # -- dispatch -----------------------------------------------------
     def execute(self, sql: str, search_mode: str = "exact") -> dict[str, Any]:
+        # Validate the full VALUES shape before evaluating any of the literals.
+        if match := _INSERT_VALUES.match(sql):
+            table = self.tables.get(match[1])
+            if table is not None:
+                if rows := table.simple_insert_rows(sql, match.end()):
+                    typed = ([self._coerce_literal(column,
+                                                   int(value) if column.type == "BIGINT" else value[1:-1])
+                              for column, value in zip(table.columns, row)] for row in rows)
+                    return self._insert_rows(table, typed)
+        if match := _DISTANCE_LITERAL.match(sql):
+            start, end = match.span(1)
+            if start + len(sql) - end <= 512:
+                template = distance_select_template(sql[:start], sql[end:])
+                if template is not None:
+                    return self.select(template, search_mode, sql[start + 1:end - 1])
         statement = Parser(tokenize(sql)).parse()
         kind = statement["type"]
         if kind == "begin":
@@ -1127,14 +1240,21 @@ class Database:
             order = [table.column_index(name) for name in columns]
             if len(set(order)) != len(order) or len(order) != len(table.columns):
                 raise DBError("unsupported_sql", "INSERT column list must cover all columns once")
+        def typed_rows():
+            for raw_values in stmt["rows"]:
+                if len(raw_values) != len(order):
+                    raise DBError("column_count_mismatch", "value count does not match column count")
+                row: list[Any] = [None] * len(table.columns)
+                for slot, expr in zip(order, raw_values):
+                    row[slot] = self._coerce(table.columns[slot], expr)
+                yield row
+
+        return self._insert_rows(table, typed_rows())
+
+    def _insert_rows(self, table, rows):
         prepared: list[list[Any]] = []
         seen: set[int] = set()
-        for raw_values in stmt["rows"]:
-            if len(raw_values) != len(order):
-                raise DBError("column_count_mismatch", "value count does not match column count")
-            row: list[Any] = [None] * len(table.columns)
-            for slot, expr in zip(order, raw_values):
-                row[slot] = self._coerce(table.columns[slot], expr)
+        for row in rows:
             pk = row[table.pk_idx]
             if pk is None:
                 raise DBError("primary_key_required", "primary key must not be NULL")
@@ -1192,7 +1312,7 @@ class Database:
         return {"affected_rows": len(pks)}
 
     # -- SELECT -------------------------------------------------------
-    def select(self, stmt: dict[str, Any], search_mode: str) -> dict[str, Any]:
+    def select(self, stmt: dict[str, Any], search_mode: str, distance_literal=None) -> dict[str, Any]:
         if stmt["table"] is None:
             return self._select_constants(stmt)
         table = self._table(stmt["table"])
@@ -1205,6 +1325,8 @@ class Database:
             aliases = []
             for item in items:
                 expr = item["expr"]
+                if expr[0] == "l2" and expr[2] is _DISTANCE_PARAMETER:
+                    expr = ("l2", expr[1], distance_literal)
                 projections.append(expr)
                 if item["alias"] is not None:
                     aliases.append(item["alias"])
@@ -1216,6 +1338,8 @@ class Database:
         order_specs: list[tuple[Any, bool]] = []
         for order in stmt["order"]:
             expr = order["expr"]
+            if expr[0] == "l2" and expr[2] is _DISTANCE_PARAMETER:
+                expr = ("l2", expr[1], distance_literal)
             if expr[0] == "column" and expr[1] in alias_map:
                 expr = alias_map[expr[1]]
             order_specs.append((expr, order["desc"]))
@@ -1335,11 +1459,12 @@ class Database:
     # -- type coercion ------------------------------------------------
     def _coerce(self, column: Column, expr, current: list[Any] | None = None):
         if expr[0] == "literal":
-            value = expr[1]
-        elif expr[0] == "column":
+            return self._coerce_literal(column, expr[1])
+        if expr[0] == "column":
             raise DBError("unsupported_sql", "column references in VALUES are not supported")
-        else:
-            raise DBError("unsupported_sql", "unsupported value expression")
+        raise DBError("unsupported_sql", "unsupported value expression")
+
+    def _coerce_literal(self, column: Column, value):
         if value is None:
             raise DBError("null_not_supported", "NULL values are not supported")
         if column.type == "BIGINT":

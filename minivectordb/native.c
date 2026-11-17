@@ -32,7 +32,8 @@ static double read_decimal(const char *start, char **end)
 {
     static const double powers_of_ten[] = {
         1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7,
-        1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15
+        1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+        1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
     };
     const char *cursor = start;
     if (*cursor == '+' || *cursor == '-')
@@ -55,11 +56,31 @@ static double read_decimal(const char *start, char **end)
             ++fractional;
         }
     }
-    if (count == 0 || decimal_digit(*cursor) || *cursor == 'e' || *cursor == 'E' ||
+    if (count == 0 || decimal_digit(*cursor) ||
         (digits[0] == '0' && (*cursor == 'x' || *cursor == 'X')))
         return strtod(start, end);
+    int shift = -fractional;
+    if (*cursor == 'e' || *cursor == 'E') {
+        ++cursor;
+        int negative = *cursor == '-';
+        if (*cursor == '-' || *cursor == '+')
+            ++cursor;
+        if (!decimal_digit(*cursor))
+            return strtod(start, end);
+        int exponent = 0;
+        while (decimal_digit(*cursor) && exponent <= 37)
+            exponent = exponent * 10 + (*cursor++ - '0');
+        if (decimal_digit(*cursor))
+            return strtod(start, end);
+        shift += negative ? -exponent : exponent;
+        if (shift < -22 || shift > 22)
+            return strtod(start, end);
+    }
     *end = (char *)cursor;
-    double magnitude = (double)coefficient / powers_of_ten[fractional];
+    // Both the coefficient and powers 10^0 through 10^22 fit exactly in a
+    // double, so one operation suffices to round ordinary decimal input.
+    double magnitude = shift >= 0 ? (double)coefficient * powers_of_ten[shift]
+                                  : (double)coefficient / powers_of_ten[-shift];
     return *start == '-' ? -magnitude : magnitude;
 }
 
@@ -191,9 +212,33 @@ static double squared_l2_avx2(const float *row, const float *query, Py_ssize_t d
     return ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3])) +
            squared_l2(row + i, query + i, dimension - i);
 }
+
+__attribute__((target("avx2,fma")))
+static float estimate_squared_l2(const float *row, const float *query, Py_ssize_t dimension)
+{
+    __m256 a = _mm256_setzero_ps();
+    __m256 b = _mm256_setzero_ps();
+    __m256 c = _mm256_setzero_ps();
+    __m256 d = _mm256_setzero_ps();
+    for (Py_ssize_t i = 0; i < dimension; i += 32) {
+        __m256 x = _mm256_sub_ps(_mm256_loadu_ps(row + i), _mm256_loadu_ps(query + i));
+        __m256 y = _mm256_sub_ps(_mm256_loadu_ps(row + i + 8), _mm256_loadu_ps(query + i + 8));
+        __m256 z = _mm256_sub_ps(_mm256_loadu_ps(row + i + 16), _mm256_loadu_ps(query + i + 16));
+        __m256 w = _mm256_sub_ps(_mm256_loadu_ps(row + i + 24), _mm256_loadu_ps(query + i + 24));
+        a = _mm256_fmadd_ps(x, x, a);
+        b = _mm256_fmadd_ps(y, y, b);
+        c = _mm256_fmadd_ps(z, z, c);
+        d = _mm256_fmadd_ps(w, w, d);
+    }
+    __m256 total = _mm256_add_ps(_mm256_add_ps(a, b), _mm256_add_ps(c, d));
+    __m128 lanes = _mm_add_ps(_mm256_castps256_ps128(total), _mm256_extractf128_ps(total, 1));
+    lanes = _mm_add_ps(lanes, _mm_movehl_ps(lanes, lanes));
+    return _mm_cvtss_f32(_mm_add_ss(lanes, _mm_shuffle_ps(lanes, lanes, 1)));
+}
 #endif
 
 static double (*compute_squared_l2)(const float *, const float *, Py_ssize_t) = squared_l2;
+static float (*estimate_l2)(const float *, const float *, Py_ssize_t);
 
 static double precise_l2(const float *row, const float *query, Py_ssize_t dimension)
 {
@@ -238,11 +283,27 @@ static int ambiguous(Hit a, Hit b, const Scan *scan, double tolerance)
            memcmp(scan->data[a.slot], scan->data[b.slot], scan->dimension * sizeof(float)) != 0;
 }
 
+static float screening_threshold(double distance, Py_ssize_t dimension, int descending)
+{
+    // Each component contributes a subtraction and a square. Each positive
+    // sum has at most dimension + 5 roundings. Allow a wider envelope for
+    // those relative errors, subnormal products, and the float64 heap keys.
+    double relative = (dimension + 32.0) * (4.0 * FLT_EPSILON);
+    double absolute = (dimension + 32.0) * FLT_MIN;
+    double squared = distance * distance;
+    return (float)(descending ? squared * (1.0 - relative) - absolute
+                              : squared * (1.0 + relative) + absolute);
+}
+
 static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const float *query,
                         const uint32_t *slots, Py_ssize_t count, int descending, int precise)
 {
     Py_ssize_t size = PyTuple_GET_SIZE(scan->vectors);
-    double tolerance = (scan->dimension + 8.0) * (4.0 * DBL_EPSILON);
+    Py_ssize_t dimension = scan->dimension;
+    double tolerance = (dimension + 8.0) * (4.0 * DBL_EPSILON);
+    int screen = estimate_l2 != NULL && dimension >= 64 && dimension <= 4096 &&
+                 dimension % 32 == 0 && limit < count;
+    float threshold = 0.0f;
     for (Py_ssize_t i = 0; i < count; ++i) {
         Py_ssize_t slot = slots == NULL ? i : slots[i];
         if (slot >= size) {
@@ -250,14 +311,21 @@ static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const flo
             return -1;
         }
         const float *vector = scan->data[slot];
-        double distance = precise ? precise_l2(vector, query, scan->dimension)
-                                  : sqrt(compute_squared_l2(vector, query, scan->dimension));
+        if (screen && i >= limit) {
+            float estimate = estimate_l2(vector, query, dimension);
+            if (isfinite(estimate) && (descending ? estimate < threshold : estimate > threshold))
+                continue;
+        }
+        double distance = precise ? precise_l2(vector, query, dimension)
+                                  : sqrt(compute_squared_l2(vector, query, dimension));
         Hit hit = {slot, distance};
         if (i < limit) {
             heap[i] = hit;
             if (i + 1 == limit) {
                 for (Py_ssize_t j = limit / 2; j > 0; --j)
                     sift_down(heap, limit, j - 1, descending);
+                if (screen)
+                    threshold = screening_threshold(heap[0].distance, dimension, descending);
             }
             continue;
         }
@@ -266,6 +334,8 @@ static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const flo
         if (better(hit, heap[0], descending)) {
             heap[0] = hit;
             sift_down(heap, limit, 0, descending);
+            if (screen)
+                threshold = screening_threshold(heap[0].distance, dimension, descending);
         }
     }
     for (Py_ssize_t i = limit - 1; i > 0; --i) {
@@ -357,6 +427,8 @@ PyMODINIT_FUNC PyInit__mvdb_native(void)
 #ifdef HAVE_AVX2
     if (__builtin_cpu_supports("avx2"))
         compute_squared_l2 = squared_l2_avx2;
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+        estimate_l2 = estimate_squared_l2;
 #endif
     return PyModule_Create(&module);
 }
