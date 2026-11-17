@@ -7,11 +7,13 @@
 
 ```text
 minivectordb/minivectordb.py   # 数据库实现（SQL 解析、存储、事务、恢复、向量检索）
-Dockerfile                     # 评测镜像（python:3.12-slim + numpy）
+minivectordb/native.c          # 向量字面量解析和精确 TopK 的 C 扩展
+Dockerfile                     # Linux x86_64 多阶段构建，运行时为 CPython 3.12
 mysqltest/                     # 官方公开用例（未改动）
 protocol_check/                # 官方协议自测工具（未改动）
 STDIO_PROTOCOL.md              # 官方协议说明（未改动）
 agent/conversation.json        # Agent prompt 学习材料
+verify/                        # 容器性能对照及回归检查
 ```
 
 ## 2. 构建与运行
@@ -40,7 +42,7 @@ docker run --rm -i -v minivectordb-data:/data --cpus=2 --memory=2g minivectordb:
 {"id":4,"ok":true}
 ```
 
-本地不构建镜像也可以直接跑：
+本地可以用 CPython 3.12 直接跑。未安装 C 扩展时，向量检索使用 Python 实现。
 
 ```bash
 python minivectordb/minivectordb.py --data-dir ./data
@@ -82,39 +84,36 @@ python3 protocol_check/run.py --image minivectordb:latest --output protocol-resu
 
 ## 4. 存储、事务与恢复
 
-`/data` 下两个文件：
+`/data/wal.v3` 保存追加式 redo 日志。每笔自动提交或显式事务对应一帧，帧头记录长度和 CRC32，帧体记录提交序号及操作。结构化数据使用 CPython marshal v4 编码，向量直接保存为 float32 字节串。写入后调用 fsync，完成后才确认提交。
 
-- `snapshot.jsonl`：快照，首行 `{"magic":"mvdb-snapshot-v2","lsn":N}`，随后每表一行元数据、每行一条记录；
-- `wal.log`：追加式 redo 日志，每行一个已提交事务：`{"lsn":N,"crc":32位校验,"ops":[...]}`。
+`/data/snapshot.v3` 保存检查点。WAL 至少增长到 64 MiB，或达到更大的现有快照大小，才触发检查点。数据库分批写出表定义和行数据，同步临时文件并原子替换快照，同步目录后再截断 WAL。正常关闭时回滚未提交事务，已同步的 WAL 可以直接用于下次恢复。
 
-写路径：自动提交语句或 `COMMIT` 先把 redo 记录写入 WAL 并 `fsync`，成功后才返回响应；
-随后按需（WAL 超过 2000 条操作）写快照并截断 WAL。快照通过临时文件 + `os.replace` 原子切换。
+启动时先恢复快照，再重放序号更新的完整 WAL 帧。恢复遇到残缺的尾帧时截断尾部，后续提交可以继续追加。启动可导入旧版 `snapshot.jsonl` 和 `wal.log`，导入成功后以 v3 文件为准。
 
-读路径：启动时加载快照，再从 WAL 逐行重放 `lsn` 更大的记录；
-末尾不完整或校验失败的行会被丢弃（进程被强杀时可能留下半行）。
-重放是幂等的：恢复途中再次被强杀，下次启动仍从同一快照重放。
-
-事务：`BEGIN` 后的修改直接作用于内存并记录 undo；`COMMIT` 落 WAL 后清空 undo；
-`ROLLBACK` 逆序恢复；正常 `shutdown` 会先回滚未提交事务再写快照。
+事务内修改作用于内存，并记录旧行和 redo 操作。`COMMIT` 同步整帧后清空事务状态，`ROLLBACK` 逆序恢复旧行。写入失败导致提交状态不确定时，进程退出，由下次启动恢复完整提交。
 
 ## 5. 向量检索
 
-- 精确模式（默认）：过滤后的候选集合内全量计算距离，按 `(距离, 主键)` 排序取 TopK；
-  有 numpy 时使用向量化扫描（缓存 float32 矩阵与列数组），无 numpy 时退化为纯 Python。
-- ANN 模式：当前同样返回精确结果（Recall@10 = 1.0）。索引元数据会被持久化，
-  `CREATE VECTOR INDEX` 后新增/更新/删除记录立即对检索可见。后续可在同一入口替换为 IVF/HNSW。
+- 精确模式先处理 `WHERE`，可复用普通列等值分组，再对候选向量计算距离。C 扩展引用行内已有的 float32 字节，在支持 AVX2 的 CPU 上用 SIMD 执行 float64 距离运算，有界堆按 `(距离, 主键)` 选出 TopK。
+- 当舍入误差可能改变入选或排序时，使用扩展精度和补偿求和复算距离。
+- 事务内的写入、回滚及其他行变动会使候选缓存失效。ANN 模式复用精确扫描，`CREATE VECTOR INDEX` 的元数据随事务日志和检查点保存。
 
-## 6. 已验证结果（本地，2026-11-17）
+## 6. 附加验证
 
-- 官方公开用例 **20/20 通过**（`mysqltest/manifest.json`，Windows 本地管道复现，与官方断言模块同一套比较逻辑）。
-- 额外验证：强杀后已提交数据保留、未提交事务丢弃；NaN/Infinity/维度不符/float32 溢出被拒绝；
-  VARCHAR 码点长度；距离并列按主键升序；过滤后 TopK；ANN 过滤结果正确。
-- 小规模基准（本机单进程，10,000 条 × 128 维，1,000 次 TopK=10，一半带等值过滤）：
-  写入 2.5 s、查询 3.1 s（约 3.1 ms/查询）、重启并 ready 0.5 s。
+在 Linux 上运行以下命令。`mvdb-baseline` 是提交 `0b1db0d` 的镜像，`minivectordb:latest` 是本版镜像。
+
+```bash
+python3 verify/regression.py minivectordb:latest --legacy mvdb-baseline
+python3 verify/benchmark.py mvdb-baseline minivectordb:latest --rounds 3
+```
+
+基准生成 10,000 条 128 维向量，每批写入 100 条，执行 1,000 次 TopK 查询，其中一半带等值过滤。脚本检查所有返回行的数量、唯一性、过滤条件及距离，对其中 40 个查询独立全量计算真值，并检查重启后的向量值。输出包含端到端用时、容器峰值内存和数据文件大小。
+
+本地 WSL2 Linux 容器通过官方握手和 20/20 个公开用例。相同负载三轮中位数为写入 2.57 s → 0.29 s，查询 2.17 s → 0.53 s，查询阶段峰值内存 70.9 MiB → 25.2 MiB。赛题的正式 E 以平台测量为准。
 
 ## 7. 已知限制
 
-1. 数据全部驻留内存，单机数据规模受内存限制；超大表需要改为磁盘行存 + 分页扫描。
+1. 行数据驻留内存，最大数据规模受容器内存限制。
 2. ANN 模式当前复用精确扫描，召回率没有问题，但大表查询延迟不会优于精确扫描。
 3. 不支持 NULL、JOIN、聚合、子查询、ALTER TABLE、多向量列、主键更新与嵌套事务。
 4. DDL 不能在显式事务内执行（返回错误），避免部分 DDL 与事务日志交错。

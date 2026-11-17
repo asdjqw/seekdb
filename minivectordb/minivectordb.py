@@ -20,7 +20,11 @@ from __future__ import annotations
 
 import argparse
 import array
+import bisect
+import heapq
+import itertools
 import json
+import marshal
 import math
 import os
 import struct
@@ -28,10 +32,10 @@ import sys
 import zlib
 from typing import Any
 
-try:  # numpy is optional: without it we fall back to a pure-python scan
-    import numpy as _np
-except Exception:  # pragma: no cover - optional dependency
-    _np = None
+try:
+    import _mvdb_native
+except ModuleNotFoundError:
+    _mvdb_native = None
 
 
 # --------------------------------------------------------------------------
@@ -42,6 +46,10 @@ class DBError(Exception):
         super().__init__(message or code)
         self.code = code
         self.message = message or code
+
+
+class StorageError(Exception):
+    """Write outcome is uncertain. The server must reopen and recover."""
 
 
 # MySQL-style numeric codes for the JSONL protocol.  The semantic names above
@@ -110,6 +118,13 @@ def tokenize(sql: str) -> list[Token]:
         if ch == "'" or ch == '"':
             quote = ch
             i += 1
+            end = sql.find(quote, i)
+            if end < 0:
+                raise DBError("syntax_error", "unterminated string literal")
+            if sql.find("\\", i, end) < 0 and not sql.startswith(quote, end + 1):
+                tokens.append(Token("string", sql[i:end]))
+                i = end + 1
+                continue
             buf: list[str] = []
             while True:
                 if i >= n:
@@ -583,9 +598,13 @@ def _round_float32(value: float) -> float:
     return result
 
 
-def parse_vector_literal(text: str, dimension: int) -> array.array:
+def parse_vector_literal(text: str, dimension: int) -> bytes:
     if not isinstance(text, str):
         raise DBError("invalid_vector", "vector literal must be a string")
+    if _mvdb_native is not None and dimension <= len(text) and "\0" not in text:
+        vector = _mvdb_native.parse_vector(text, dimension)
+        if vector is not None:
+            return vector
     body = text.strip()
     if not (body.startswith("[") and body.endswith("]")):
         raise DBError("invalid_vector", "vector literal must look like [1,2,3]")
@@ -606,7 +625,7 @@ def parse_vector_literal(text: str, dimension: int) -> array.array:
         if not math.isfinite(number):
             raise DBError("invalid_vector", "vector value must be finite")
         values.append(_round_float32(number))
-    return values
+    return values.tobytes()
 
 
 # --------------------------------------------------------------------------
@@ -620,11 +639,9 @@ class Table:
         self.vec_idx = vec_idx
         self.rows: dict[int, list[Any]] = {}
         self.indexes: dict[str, str] = {}
-        self.version = 0
-        self._cache_version = -1
         self._cache_pks = None
-        self._cache_matrix = None
-        self._column_cache: dict[int, tuple[int, Any]] = {}
+        self._scan = None
+        self._groups: dict[int, dict[Any, array.array] | None] = {}
 
     # -- schema -------------------------------------------------------
     def column_index(self, name: str) -> int:
@@ -643,15 +660,6 @@ class Table:
             "indexes": self.indexes,
         }
 
-    def _row_to_json(self, pk: int, row: list[Any]) -> list[Any]:
-        out = []
-        for idx, value in enumerate(row):
-            if idx == self.vec_idx and isinstance(value, array.array):
-                out.append(list(value))
-            else:
-                out.append(value)
-        return out
-
     @staticmethod
     def from_meta(data: dict[str, Any]) -> "Table":
         table = Table(data["name"], [Column.from_json(c) for c in data["columns"]],
@@ -660,64 +668,56 @@ class Table:
         return table
 
     def add_row(self, row: list[Any]) -> None:
-        values: list[Any] = []
-        for idx, value in enumerate(row):
-            if idx == self.vec_idx:
-                values.append(array.array("f", [float(v) for v in value]))
-            else:
-                values.append(value)
-        self.rows[values[self.pk_idx]] = values
-        self.version += 1
+        if self.vec_idx >= 0 and not isinstance(row[self.vec_idx], bytes):
+            row[self.vec_idx] = array.array("f", row[self.vec_idx]).tobytes()
+        self.rows[row[self.pk_idx]] = row
 
     # -- vector cache -------------------------------------------------
-    def matrix(self):
-        """Return (pks, float32 matrix) ordered by primary key."""
-        if _np is None:
-            return None, None
-        if self._cache_version != self.version:
-            pks = sorted(self.rows)
-            if not pks:
-                self._cache_pks = _np.zeros(0, dtype=_np.int64)
-                self._cache_matrix = _np.zeros((0, 0), dtype=_np.float32)
-            else:
-                dim = len(self.rows[pks[0]][self.vec_idx])
-                matrix = _np.empty((len(pks), dim), dtype=_np.float32)
-                for index, pk in enumerate(pks):
-                    matrix[index] = self.rows[pk][self.vec_idx]
-                self._cache_pks = _np.asarray(pks, dtype=_np.int64)
-                self._cache_matrix = matrix
-            self._cache_version = self.version
-            self._column_cache.clear()
-        return self._cache_pks, self._cache_matrix
+    def vector_scan(self):
+        if self._cache_pks is None:
+            self._cache_pks = sorted(self.rows)
+        if _mvdb_native is not None and self._scan is None and self._cache_pks:
+            vectors = tuple(self.rows[pk][self.vec_idx] for pk in self._cache_pks)
+            self._scan = _mvdb_native.build_scan(vectors, self.columns[self.vec_idx].size)
+        return self._cache_pks, self._scan
 
-    def column_array(self, index: int):
-        if _np is None:
-            return None
-        entry = self._column_cache.get(index)
-        if entry is not None and entry[0] == self.version:
-            return entry[1]
-        pks, _ = self.matrix()
-        values = [self.rows[int(pk)][index] for pk in pks]
-        if index == self.vec_idx:
-            array_values = _np.asarray([list(v) for v in values], dtype=_np.float32)
-        elif any(isinstance(v, str) for v in values):
-            array_values = _np.asarray(values, dtype=object)
-        else:
-            array_values = _np.asarray(values, dtype=_np.int64)
-        self._column_cache[index] = (self.version, array_values)
-        return array_values
+    def equal_slots(self, pks, index, value):
+        if index == self.pk_idx:
+            if value not in self.rows:
+                return array.array("I")
+            return array.array("I", [bisect.bisect_left(pks, value)])
+        if index not in self._groups:
+            groups = {}
+            for slot, pk in enumerate(pks):
+                key = self.rows[pk][index]
+                group = groups.get(key)
+                if group is None:
+                    # Cap lookup overhead for high-cardinality columns.
+                    if len(groups) >= 1024:
+                        groups = None
+                        break
+                    groups[key] = group = array.array("I")
+                group.append(slot)
+            self._groups[index] = groups
+        groups = self._groups[index]
+        if groups is None:
+            return array.array("I", (i for i, pk in enumerate(pks) if self.rows[pk][index] == value))
+        return groups.get(value, array.array("I"))
 
     def touch(self) -> None:
-        self.version += 1
+        self._cache_pks = None
+        self._scan = None
+        self._groups.clear()
 
 
 # --------------------------------------------------------------------------
 # storage: snapshot + WAL
 # --------------------------------------------------------------------------
 class Storage:
-    SNAPSHOT = "snapshot.jsonl"
-    WAL = "wal.log"
-    SNAPSHOT_MAGIC = "mvdb-snapshot-v2"
+    SNAPSHOT = "snapshot.v3"
+    WAL = "wal.v3"
+    FRAME = struct.Struct("<QI")
+    CHECKPOINT_BYTES = 64 * 1024 * 1024
 
     def __init__(self, data_dir: str) -> None:
         self.data_dir = data_dir
@@ -725,21 +725,35 @@ class Storage:
         self.snapshot_path = os.path.join(data_dir, self.SNAPSHOT)
         self.wal_path = os.path.join(data_dir, self.WAL)
         self.lsn = 0
-        self._wal_ops = 0
+        self.wal_bytes = 0
+        self.checkpoint_bytes = self.CHECKPOINT_BYTES
 
-    def load(self) -> tuple[dict[str, Table], int]:
+    def load(self) -> dict[str, Table]:
         tables: dict[str, Table] = {}
         if os.path.exists(self.snapshot_path):
-            with open(self.snapshot_path, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
+            self.checkpoint_bytes = max(self.checkpoint_bytes, os.path.getsize(self.snapshot_path))
+            with open(self.snapshot_path, "rb") as handle:
+                self.lsn, = struct.unpack("<Q", handle.read(8))
+                while True:
+                    frame = self._read_frame(handle)
+                    if frame is None:
                         break
-                    if record.get("magic") == self.SNAPSHOT_MAGIC:
+                    apply_ops(tables, frame)
+        else:
+            self._import_legacy(tables)
+        self._replay_wal(tables)
+        return tables
+
+    def _import_legacy(self, tables: dict[str, Table]) -> None:
+        snapshot = os.path.join(self.data_dir, "snapshot.jsonl")
+        wal = os.path.join(self.data_dir, "wal.log")
+        if not (os.path.exists(snapshot) or os.path.exists(wal)):
+            return
+        if os.path.exists(snapshot):
+            with open(snapshot, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    record = json.loads(line)
+                    if record.get("magic") == "mvdb-snapshot-v2":
                         self.lsn = int(record.get("lsn", 0))
                         continue
                     kind = record.get("t")
@@ -750,70 +764,107 @@ class Storage:
                         table = tables.get(record.get("table", ""))
                         if table is not None:
                             table.add_row(record["row"])
-        self._replay_wal(tables)
-        return tables, self.lsn
+        if os.path.exists(wal):
+            with open(wal, "rb") as handle:
+                for raw in handle:
+                    if not raw.endswith(b"\n"):
+                        break
+                    try:
+                        record = json.loads(raw)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        break
+                    ops, lsn = record["ops"], record["lsn"]
+                    checksum = zlib.crc32(json.dumps(ops, ensure_ascii=False,
+                                                     sort_keys=True).encode("utf-8"))
+                    if checksum != record["crc"]:
+                        break
+                    if lsn > self.lsn:
+                        apply_ops(tables, ops)
+                        self.lsn = lsn
+        self.write_snapshot(tables)
+
+    def _read_frame(self, handle):
+        header = handle.read(self.FRAME.size)
+        if not header:
+            return None
+        if len(header) != self.FRAME.size:
+            raise EOFError("incomplete frame header")
+        size, checksum = self.FRAME.unpack(header)
+        if size > os.fstat(handle.fileno()).st_size - handle.tell():
+            raise EOFError("incomplete frame body")
+        payload = handle.read(size)
+        if zlib.crc32(payload) != checksum:
+            raise ValueError("frame checksum mismatch")
+        return marshal.loads(payload)
 
     def _replay_wal(self, tables: dict[str, Table]) -> None:
         if not os.path.exists(self.wal_path):
             return
-        with open(self.wal_path, "rb") as handle:
-            for raw in handle:
-                if not raw.endswith(b"\n"):
-                    break  # torn tail: ignore the incomplete record
-                if not raw.strip():
-                    continue
+        with open(self.wal_path, "r+b") as handle:
+            while True:
+                good_end = handle.tell()
                 try:
-                    record = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                    frame = self._read_frame(handle)
+                except (EOFError, ValueError):
+                    # Remove the torn suffix before future commits are appended.
+                    handle.truncate(good_end)
+                    self._sync(handle)
                     break
-                payload = record.get("ops") or []
-                checksum = record.get("crc")
-                if checksum is not None:
-                    computed = zlib.crc32(json.dumps(payload, ensure_ascii=False,
-                                                     sort_keys=True).encode("utf-8"))
-                    if computed != checksum:
-                        break
-                if int(record.get("lsn", 0)) <= self.lsn:
-                    continue
-                self.lsn = int(record.get("lsn", self.lsn))
-                apply_ops(tables, payload)
+                if frame is None:
+                    break
+                lsn, ops = frame
+                if lsn > self.lsn:
+                    apply_ops(tables, ops)
+                    self.lsn = lsn
+            self.wal_bytes = good_end
 
     # -- writes -------------------------------------------------------
-    def append_commit(self, ops: list[dict[str, Any]]) -> int:
-        self.lsn += 1
-        payload = json.dumps(ops, ensure_ascii=False, sort_keys=True)
-        crc = zlib.crc32(payload.encode("utf-8"))
-        record = json.dumps({"lsn": self.lsn, "crc": crc, "ops": ops},
-                            ensure_ascii=False)
-        with open(self.wal_path, "ab") as handle:
-            handle.write(record.encode("utf-8") + b"\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        self._wal_ops += len(ops)
-        return self.lsn
+    def _write_frame(self, handle, value) -> int:
+        payload = marshal.dumps(value, 4)
+        handle.write(self.FRAME.pack(len(payload), zlib.crc32(payload)))
+        handle.write(payload)
+        return self.FRAME.size + len(payload)
+
+    @staticmethod
+    def _sync(handle) -> None:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    def append_commit(self, ops: list[dict[str, Any]]) -> None:
+        lsn = self.lsn + 1
+        try:
+            first = not os.path.exists(self.wal_path)
+            with open(self.wal_path, "ab") as handle:
+                size = self._write_frame(handle, (lsn, ops))
+                self._sync(handle)
+            if first:
+                self._fsync_dir()
+        except OSError as exc:
+            raise StorageError("could not commit WAL record") from exc
+        self.wal_bytes += size
+        self.lsn = lsn
 
     def write_snapshot(self, tables: dict[str, Table]) -> None:
-        tmp_path = self.snapshot_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"magic": self.SNAPSHOT_MAGIC, "lsn": self.lsn}) + "\n")
-            for name in sorted(tables):
-                table = tables[name]
-                handle.write(json.dumps({"t": "table", "name": table.name,
-                                         "columns": [c.to_json() for c in table.columns],
-                                         "pk": table.pk_idx, "vec": table.vec_idx,
-                                         "indexes": table.indexes}, ensure_ascii=False) + "\n")
-                for pk in sorted(table.rows):
-                    row = table._row_to_json(pk, table.rows[pk])
-                    handle.write(json.dumps({"t": "row", "table": table.name,
-                                             "row": row}, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, self.snapshot_path)
-        self._fsync_dir()
-        with open(self.wal_path, "wb") as handle:
-            handle.flush()
-            os.fsync(handle.fileno())
-        self._wal_ops = 0
+        try:
+            tmp_path = self.snapshot_path + ".tmp"
+            with open(tmp_path, "wb") as handle:
+                handle.write(struct.pack("<Q", self.lsn))
+                for table in tables.values():
+                    self._write_frame(handle, [{"t": "create_table", **table.to_json()}])
+                    rows = iter(table.rows.values())
+                    while batch := list(itertools.islice(rows, 256)):
+                        self._write_frame(handle, [{"t": "insert", "table": table.name,
+                                                   "rows": batch}])
+                size = handle.tell()
+                self._sync(handle)
+            os.replace(tmp_path, self.snapshot_path)
+            self._fsync_dir()
+            with open(self.wal_path, "wb") as handle:
+                self._sync(handle)
+        except OSError as exc:
+            raise StorageError("could not checkpoint database") from exc
+        self.checkpoint_bytes = max(self.CHECKPOINT_BYTES, size)
+        self.wal_bytes = 0
 
     def _fsync_dir(self) -> None:
         try:
@@ -830,8 +881,7 @@ def apply_ops(tables: dict[str, Table], ops: list[dict[str, Any]]) -> None:
     for op in ops:
         kind = op.get("t")
         if kind == "create_table":
-            columns = [Column.from_json(c) for c in op["columns"]]
-            tables[op["name"]] = Table(op["name"], columns, op["pk"], op.get("vec", -1))
+            tables[op["name"]] = Table.from_meta(op)
         elif kind == "drop_table":
             tables.pop(op["name"], None)
         elif kind == "delete_all":
@@ -843,42 +893,18 @@ def apply_ops(tables: dict[str, Table], ops: list[dict[str, Any]]) -> None:
             table = tables.get(op["table"])
             if table is not None:
                 table.indexes[op["name"]] = op["column"]
-        elif kind == "insert":
+        elif kind in ("insert", "update"):
             table = tables.get(op["table"])
             if table is None:
                 continue
-            vec_idx = table.vec_idx
             for row in op["rows"]:
-                values = []
-                for idx, value in enumerate(row):
-                    if idx == vec_idx:
-                        values.append(array.array("f", [float(v) for v in value]))
-                    else:
-                        values.append(value)
-                table.rows[values[table.pk_idx]] = values
-                table.version += 1
-        elif kind == "update":
-            table = tables.get(op["table"])
-            if table is None:
-                continue
-            vec_idx = table.vec_idx
-            for row in op["rows"]:
-                values = []
-                for idx, value in enumerate(row):
-                    if idx == vec_idx:
-                        values.append(array.array("f", [float(v) for v in value]))
-                    else:
-                        values.append(value)
-                table.rows[values[table.pk_idx]] = values
-                table.version += 1
+                table.add_row(row)
         elif kind == "delete":
             table = tables.get(op["table"])
             if table is None:
                 continue
             for pk in op["pks"]:
-                if pk in table.rows:
-                    del table.rows[pk]
-                    table.version += 1
+                table.rows.pop(pk, None)
 
 
 # --------------------------------------------------------------------------
@@ -894,12 +920,11 @@ class Database:
 
     # -- lifecycle ----------------------------------------------------
     def open(self) -> None:
-        self.tables, _ = self.storage.load()
+        self.tables = self.storage.load()
 
     def close(self) -> None:
         if self.in_txn:
             self.rollback()
-        self.storage.write_snapshot(self.tables)
 
     # -- dispatch -----------------------------------------------------
     def execute(self, sql: str, search_mode: str = "exact") -> dict[str, Any]:
@@ -970,7 +995,7 @@ class Database:
         return {}
 
     def _maybe_snapshot(self) -> None:
-        if self.storage._wal_ops >= 2000:
+        if self.storage.wal_bytes >= self.storage.checkpoint_bytes:
             self.storage.write_snapshot(self.tables)
 
     def _record(self, ops: list[dict[str, Any]]) -> None:
@@ -1119,11 +1144,10 @@ class Database:
             prepared.append(row)
         for row in prepared:
             table.rows[row[table.pk_idx]] = row
-            table.touch()
             if self.in_txn:
                 self.undo.append((table, row[table.pk_idx], None))
-        serialised = [self._serialise_row(table, row) for row in prepared]
-        self._record([{"t": "insert", "table": table.name, "rows": serialised}])
+        table.touch()
+        self._record([{"t": "insert", "table": table.name, "rows": prepared}])
         return {"affected_rows": len(prepared)}
 
     def update(self, stmt: dict[str, Any]) -> dict[str, Any]:
@@ -1147,12 +1171,11 @@ class Database:
             undo_entries.append((table, pk, old))
         for (table_ref, pk, _old), new_row in zip(undo_entries, updated):
             table_ref.rows[pk] = new_row
-            table_ref.touch()
             if self.in_txn:
                 self.undo.append((table_ref, pk, _old))
         if updated:
-            self._record([{"t": "update", "table": table.name,
-                           "rows": [self._serialise_row(table, row) for row in updated]}])
+            table.touch()
+            self._record([{"t": "update", "table": table.name, "rows": updated}])
         return {"affected_rows": len(updated)}
 
     def delete(self, stmt: dict[str, Any]) -> dict[str, Any]:
@@ -1163,8 +1186,8 @@ class Database:
             if self.in_txn:
                 self.undo.append((table, pk, table.rows[pk]))
             del table.rows[pk]
-            table.touch()
         if pks:
+            table.touch()
             self._record([{"t": "delete", "table": table.name, "pks": pks}])
         return {"affected_rows": len(pks)}
 
@@ -1197,14 +1220,16 @@ class Database:
                 expr = alias_map[expr[1]]
             order_specs.append((expr, order["desc"]))
 
-        if _np is not None and stmt["limit"] is not None and len(order_specs) == 1 \
+        if stmt["limit"] is not None and len(order_specs) == 1 \
                 and order_specs[0][0][0] == "l2":
-            hits = self._fast_topk(table, order_specs[0][0], stmt["where"],
+            distance_expr = order_specs[0][0]
+            hits = self._fast_topk(table, distance_expr, stmt["where"],
                                    int(stmt["limit"]), order_specs[0][1])
             if hits is not None:
                 result_rows = []
-                for pk, _distance in hits:
-                    values = self._evaluate_row(table, table.rows[pk], projections)
+                for pk, distance in hits:
+                    values = self._evaluate_row(table, table.rows[pk], projections,
+                                                (distance_expr, distance))
                     result_rows.append([self._json_value(v) for v in values])
                 return {"columns": aliases, "rows": result_rows}
 
@@ -1245,7 +1270,8 @@ class Database:
             return f"L2_DISTANCE({expr[1]})"
         return "expr"
 
-    def _evaluate_row(self, table: Table, row: list[Any], exprs: list[Any]) -> list[Any]:
+    def _evaluate_row(self, table: Table, row: list[Any], exprs: list[Any],
+                      known_distance=None) -> list[Any]:
         out = []
         for expr in exprs:
             kind = expr[0]
@@ -1257,117 +1283,54 @@ class Database:
                 idx = expr[1]
                 out.append(out[idx] if idx < len(out) else None)
             elif kind == "l2":
+                if known_distance is not None and expr == known_distance[0]:
+                    out.append(known_distance[1])
+                    continue
                 column_idx = table.column_index(expr[1])
-                target = parse_vector_literal(expr[2], len(row[column_idx]))
-                out.append(self._distance(row[column_idx], target))
+                vector = row[column_idx]
+                target = parse_vector_literal(expr[2], len(vector) // 4)
+                out.append(self._distance(vector, target))
             else:
                 raise DBError("unsupported_sql", "unsupported expression")
         return out
 
     @staticmethod
-    def _distance(vector, target) -> float:
-        if _np is not None:
-            a = _np.frombuffer(vector, dtype=_np.float32) if isinstance(vector, array.array) \
-                else _np.asarray(vector, dtype=_np.float32)
-            b = _np.frombuffer(target, dtype=_np.float32) if isinstance(target, array.array) \
-                else _np.asarray(target, dtype=_np.float32)
-            return float(_np.linalg.norm(a.astype(_np.float64) - b.astype(_np.float64)))
-        total = 0.0
-        for x, y in zip(vector, target):
-            diff = float(x) - float(y)
-            total += diff * diff
-        return math.sqrt(total)
-
-    def _numpy_mask(self, table: Table, condition, pks):
-        """Vectorised WHERE evaluation; returns None when the shape is unsupported."""
-        if _np is None:
-            return None
-        if condition is None:
-            return _np.ones(len(pks), dtype=bool)
-        kind = condition[0]
-        if kind in ("and", "or"):
-            left = self._numpy_mask(table, condition[1], pks)
-            right = self._numpy_mask(table, condition[2], pks)
-            if left is None or right is None:
-                return None
-            return (left & right) if kind == "and" else (left | right)
-        if kind == "cmp":
-            _tag, op, left, right = condition
-            flipped = {"<": ">", ">": "<", "<=": ">=", ">=": "<=", "=": "=", "!=": "!="}
-            if left[0] == "column" and right[0] == "literal":
-                column, literal = left, right[1]
-            elif right[0] == "column" and left[0] == "literal":
-                column, literal = right, left[1]
-                op = flipped.get(op, op)
-            else:
-                return None
-            try:
-                index = table.column_index(column[1])
-            except DBError:
-                return None
-            if index == table.vec_idx:
-                return None
-            values = table.column_array(index)
-            if values is None:
-                return None
-            if isinstance(literal, bool) or not isinstance(literal, (int, str)) or literal is None:
-                return None
-            if isinstance(literal, int) and values.dtype == object:
-                return None
-            if isinstance(literal, str) and values.dtype != object:
-                return None
-            with _np.errstate(invalid="ignore"):
-                if op == "=":
-                    return values == literal
-                if op == "!=":
-                    return values != literal
-                if op == "<":
-                    return values < literal
-                if op == "<=":
-                    return values <= literal
-                if op == ">":
-                    return values > literal
-                if op == ">=":
-                    return values >= literal
-        return None
+    def _distance(vector: bytes, target: bytes) -> float:
+        return math.dist(memoryview(vector).cast("f"), memoryview(target).cast("f"))
 
     def _fast_topk(self, table: Table, expr, condition, limit: int, desc: bool):
-        """Vectorised exact TopK for ORDER BY L2_DISTANCE(...) LIMIT k."""
-        if _np is None or table.vec_idx < 0 or limit <= 0:
+        """Scan only qualifying rows and retain the best k by (distance, primary key)."""
+        if table.vec_idx < 0 or limit <= 0:
             return None
-        try:
-            column_index = table.column_index(expr[1])
-        except DBError:
+        if table.column_index(expr[1]) != table.vec_idx:
             return None
-        if column_index != table.vec_idx:
-            return None
-        pks, matrix = table.matrix()
-        if pks is None:
-            return None
-        mask = self._numpy_mask(table, condition, pks)
-        if mask is None:
-            return None
-        dimension = int(table.columns[table.vec_idx].size)
-        target = parse_vector_literal(expr[2], dimension)
-        query = _np.frombuffer(target, dtype=_np.float32)
-        if matrix.shape[0] == 0:
+        pks, scan = table.vector_scan()
+        target = parse_vector_literal(expr[2], table.columns[table.vec_idx].size)
+        if not pks:
             return []
-        diff = matrix - query
-        distances = _np.sqrt(_np.einsum("ij,ij->i", diff, diff, dtype=_np.float64))
-        candidates = _np.flatnonzero(mask)
-        if candidates.size == 0:
-            return []
-        values = distances[candidates]
-        keys = pks[candidates]
-        k = min(limit, candidates.size)
-        if desc:
-            order = _np.lexsort((keys, -values))[:k]
-        elif k < candidates.size:
-            part = _np.argpartition(values, k - 1)[:k]
-            order = part[_np.lexsort((keys[part], values[part]))]
-        else:
-            order = _np.lexsort((keys, values))
-        return [(int(keys[index]), float(values[index])) for index in order]
+        candidates = None if condition is None else self._candidate_slots(table, pks, condition)
+        limit = min(limit, len(pks))
+        if scan is not None:
+            hits = _mvdb_native.topk(scan, target, candidates, limit, desc)
+            return [(pks[slot], distance) for slot, distance in hits]
+
+        slots = range(len(pks)) if candidates is None else candidates
+        distances = ((pks[slot], self._distance(table.rows[pks[slot]][table.vec_idx], target))
+                     for slot in slots)
+        return heapq.nsmallest(limit, distances,
+                              key=lambda hit: (-hit[1] if desc else hit[1], hit[0]))
+
+    def _candidate_slots(self, table: Table, pks, condition):
+        if condition[:2] == ("cmp", "="):
+            left, right = condition[2:]
+            if left[0] == "literal":
+                left, right = right, left
+            if left[0] == "column" and right[0] == "literal":
+                index = table.column_index(left[1])
+                if index != table.vec_idx:
+                    return table.equal_slots(pks, index, right[1])
+        return array.array("I", (slot for slot, pk in enumerate(pks)
+                                if self._match(table, table.rows[pk], condition)))
 
     # -- type coercion ------------------------------------------------
     def _coerce(self, column: Column, expr, current: list[Any] | None = None):
@@ -1396,15 +1359,6 @@ class Database:
                 raise DBError("type_mismatch", "VECTOR column requires a string literal")
             return parse_vector_literal(value, int(column.size))
         raise DBError("unsupported_sql", f"unsupported column type {column.type}")
-
-    def _serialise_row(self, table: Table, row: list[Any]) -> list[Any]:
-        out = []
-        for idx, value in enumerate(row):
-            if idx == table.vec_idx and isinstance(value, array.array):
-                out.append([float(x) for x in value])
-            else:
-                out.append(value)
-        return out
 
     # -- WHERE evaluation ---------------------------------------------
     def _match(self, table: Table, row: list[Any], condition) -> bool:
@@ -1438,18 +1392,20 @@ class Database:
         if expr[0] == "literal":
             return expr[1]
         if expr[0] == "column":
-            return row[table.column_index(expr[1])]
+            value = row[table.column_index(expr[1])]
+            return array.array("f", value) if isinstance(value, bytes) else value
         if expr[0] == "l2":
             column_idx = table.column_index(expr[1])
-            target = parse_vector_literal(expr[2], len(row[column_idx]))
-            return self._distance(row[column_idx], target)
+            vector = row[column_idx]
+            target = parse_vector_literal(expr[2], len(vector) // 4)
+            return self._distance(vector, target)
         raise DBError("unsupported_sql", "unsupported value expression")
 
     # -- JSON conversion ----------------------------------------------
     @staticmethod
     def _json_value(value):
-        if isinstance(value, array.array):
-            return [float(x) for x in value]
+        if isinstance(value, bytes):
+            return memoryview(value).cast("f").tolist()
         if isinstance(value, float):
             if not math.isfinite(value):
                 raise DBError("internal_error", "non-finite value")
@@ -1505,6 +1461,9 @@ def serve(data_dir: str) -> int:
             result = database.execute(sql, mode)
             response = {"id": request_id, "ok": True}
             response.update(result)
+        except StorageError as exc:
+            sys.stderr.write(f"storage error: {exc}: {exc.__cause__}\n")
+            return 1
         except DBError as exc:
             response = {"id": request_id, "ok": False,
                         "error": {"code": ERROR_CODE_MAP.get(exc.code, exc.code),
