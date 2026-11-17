@@ -64,6 +64,40 @@ def check_near_cutoff(session):
           flush=True)
 
 
+def check_partition_merge(session):
+    sql(session, "CREATE TABLE split(id BIGINT PRIMARY KEY,grp BIGINT,v VECTOR(128))")
+    vectors = {}
+    for key in range(4608):
+        vector = [0] * 128
+        vector[0] = 5 + key % 13
+        vectors[key] = vector
+
+    # Identical distances across halves, with different vector bytes. This
+    # also exercises the high-precision retry after merging two local heaps.
+    vectors[9][0], vectors[4100][64] = 1, -1
+    vectors[4100][0] = 0
+    vectors[11][0], vectors[4101][0] = -(2 ** 27), 2 ** 27
+    for start in range(0, len(vectors), 128):
+        values = ",".join(f"({key},{int(key >= 8)},'{vectors[key]}')"
+                          for key in range(start, start + 128))
+        sql(session, "INSERT INTO split VALUES " + values)
+
+    zero = [0] * 128
+    for where in ("", " WHERE grp = 1"):
+        for order in ("ASC", "DESC"):
+            statement = (f"SELECT id,L2_DISTANCE(v,'{zero}') AS d FROM split"
+                         f"{where} ORDER BY d {order} LIMIT")
+            expected = [(key, math.dist(vector, zero)) for key, vector in vectors.items()
+                        if not where or key >= 8]
+            direction = 1 if order == "ASC" else -1
+            expected.sort(key=lambda hit: (direction * hit[1], hit[0]))
+            for limit in (1, 10, 128):
+                rows = sql(session, f"{statement} {limit}")
+                assert rows == [list(hit) for hit in expected[:limit]], rows
+    print("Partition merge, top-K cutoffs, cross-partition ties and equality filter: 12/12 PASS",
+          flush=True)
+
+
 def run(candidate, legacy, root):
     session = Session(CONFIG, root / "stderr.log", image=legacy or candidate, data_root=root)
     try:
@@ -110,6 +144,7 @@ def run(candidate, legacy, root):
         print(f"Mixed-magnitude tie across SIMD and tail dimensions: {rows}", flush=True)
         check_insert_paths(session)
         check_near_cutoff(session)
+        check_partition_merge(session)
 
         sql(session, "BEGIN")
         sql(session, "UPDATE t SET grp='排除' WHERE id=3")

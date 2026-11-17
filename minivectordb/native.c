@@ -1,11 +1,17 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <ctype.h>
+#include <errno.h>
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#endif
 
 #if defined(__x86_64__) && defined(__GNUC__)
 #include <immintrin.h>
@@ -14,6 +20,7 @@
 
 typedef struct {
     PyObject *vectors;
+    Py_ssize_t count;
     Py_ssize_t dimension;
     const float *data[];
 } Scan;
@@ -84,18 +91,13 @@ static double read_decimal(const char *start, char **end)
     return *start == '-' ? -magnitude : magnitude;
 }
 
-static PyObject *parse_vector(PyObject *self, PyObject *args)
+static PyObject *read_vector(const char *cursor, char terminator, Py_ssize_t dimension,
+                             const char **next)
 {
-    const char *cursor;
-    Py_ssize_t dimension;
-    if (!PyArg_ParseTuple(args, "sn", &cursor, &dimension))
-        return NULL;
-    if (dimension <= 0 || dimension > PY_SSIZE_T_MAX / (Py_ssize_t)sizeof(float))
-        Py_RETURN_NONE;
     while (isspace((unsigned char)*cursor))
         ++cursor;
     if (*cursor++ != '[')
-        Py_RETURN_NONE;
+        return NULL;
 
     PyObject *result = PyBytes_FromStringAndSize(NULL, dimension * sizeof(float));
     if (result == NULL)
@@ -124,11 +126,147 @@ static PyObject *parse_vector(PyObject *self, PyObject *args)
     }
     while (isspace((unsigned char)*cursor))
         ++cursor;
-    if (*cursor == '\0')
+    if (*cursor == terminator) {
+        *next = cursor + 1;
         return result;
+    }
 
 fallback:
     Py_DECREF(result);
+    return NULL;
+}
+
+static PyObject *parse_vector(PyObject *self, PyObject *args)
+{
+    const char *cursor, *next;
+    Py_ssize_t dimension;
+    if (!PyArg_ParseTuple(args, "sn", &cursor, &dimension))
+        return NULL;
+    if (dimension <= 0 || dimension > PY_SSIZE_T_MAX / (Py_ssize_t)sizeof(float))
+        Py_RETURN_NONE;
+    PyObject *result = read_vector(cursor, '\0', dimension, &next);
+    if (result != NULL || PyErr_Occurred())
+        return result;
+    Py_RETURN_NONE;
+}
+
+static const char *skip_sql_space(const char *cursor)
+{
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n')
+        ++cursor;
+    return cursor;
+}
+
+// The Python caller supplies a schema and the offset of VALUES. Only plain
+// literals are accepted here. Any other form is handled by the SQL parser.
+static PyObject *read_sql_literal(const char **position, const char *end, Py_ssize_t type)
+{
+    const char *cursor = skip_sql_space(*position);
+    if (type == 0) {
+        const char *digits = *cursor == '-' ? cursor + 1 : cursor;
+        if (!decimal_digit(*digits))
+            return NULL;
+        char *next;
+        errno = 0;
+        long long integer = strtoll(cursor, &next, 10);
+        if (errno == ERANGE || next - digits > 19)
+            return NULL;
+        *position = next;
+        return PyLong_FromLongLong(integer);
+    }
+    char quote = *cursor;
+    if (quote != '\'' && quote != '"')
+        return NULL;
+    ++cursor;
+    if (type > 0) {
+        if (type > end - cursor || type > PY_SSIZE_T_MAX / (Py_ssize_t)sizeof(float))
+            return NULL;
+        return read_vector(cursor, quote, type, position);
+    }
+    const char *close = strchr(cursor, quote);
+    if (close == NULL || memchr(cursor, '\\', close - cursor) != NULL)
+        return NULL;
+    PyObject *text = PyUnicode_DecodeUTF8(cursor, close - cursor, "strict");
+    if (text != NULL && PyUnicode_GET_LENGTH(text) > -type) {
+        Py_DECREF(text);
+        return NULL;
+    }
+    *position = close + 1;
+    return text;
+}
+
+static PyObject *parse_insert_rows(PyObject *self, PyObject *args)
+{
+    PyObject *sql, *schema;
+    Py_ssize_t offset, size;
+    if (!PyArg_ParseTuple(args, "UnO!", &sql, &offset, &PyTuple_Type, &schema))
+        return NULL;
+    const char *text = PyUnicode_AsUTF8AndSize(sql, &size);
+    if (text == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_UnicodeEncodeError)) {
+            PyErr_Clear();
+            Py_RETURN_NONE;
+        }
+        return NULL;
+    }
+    if (offset < 0 || offset >= size || memchr(text, '\0', size) != NULL)
+        Py_RETURN_NONE;
+    Py_ssize_t columns = PyTuple_GET_SIZE(schema);
+    if (columns <= 0)
+        Py_RETURN_NONE;
+    Py_ssize_t *types = PyMem_New(Py_ssize_t, columns);
+    if (types == NULL)
+        return PyErr_NoMemory();
+    for (Py_ssize_t i = 0; i < columns; ++i) {
+        types[i] = PyLong_AsSsize_t(PyTuple_GET_ITEM(schema, i));
+        if (PyErr_Occurred()) {
+            PyMem_Free(types);
+            return NULL;
+        }
+    }
+    PyObject *rows = PyList_New(0);
+    PyObject *row = NULL;
+    if (rows == NULL)
+        goto fallback;
+    const char *cursor = text + offset;
+    const char *end = text + size;
+    for (;;) {
+        cursor = skip_sql_space(cursor);
+        if (*cursor++ != '(')
+            goto fallback;
+        row = PyList_New(columns);
+        if (row == NULL)
+            goto fallback;
+        for (Py_ssize_t i = 0; i < columns; ++i) {
+            PyObject *value = read_sql_literal(&cursor, end, types[i]);
+            if (value == NULL)
+                goto fallback;
+            PyList_SET_ITEM(row, i, value);
+            cursor = skip_sql_space(cursor);
+            if (*cursor++ != (i + 1 == columns ? ')' : ','))
+                goto fallback;
+        }
+        if (PyList_Append(rows, row) < 0)
+            goto fallback;
+        Py_CLEAR(row);
+        cursor = skip_sql_space(cursor);
+        if (*cursor != ',')
+            break;
+        ++cursor;
+    }
+    if (*cursor == ';')
+        cursor = skip_sql_space(cursor + 1);
+    if (*cursor != '\0')
+        goto fallback;
+    PyMem_Free(types);
+    return rows;
+
+fallback:
+    PyMem_Free(types);
+    Py_XDECREF(row);
+    Py_XDECREF(rows);
+    if (PyErr_Occurred())
+        return NULL;
     Py_RETURN_NONE;
 }
 
@@ -154,6 +292,7 @@ static PyObject *build_scan(PyObject *self, PyObject *args)
     Scan *scan = PyMem_Malloc(sizeof(Scan) + count * sizeof(float *));
     if (scan == NULL)
         return PyErr_NoMemory();
+    scan->count = count;
     scan->dimension = dimension;
     for (Py_ssize_t i = 0; i < count; ++i) {
         PyObject *vector = PyTuple_GET_ITEM(vectors, i);
@@ -296,20 +435,18 @@ static float screening_threshold(double distance, Py_ssize_t dimension, int desc
 }
 
 static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const float *query,
-                        const uint32_t *slots, Py_ssize_t count, int descending, int precise)
+                        const uint32_t *slots, Py_ssize_t begin, Py_ssize_t count,
+                        int descending, int precise)
 {
-    Py_ssize_t size = PyTuple_GET_SIZE(scan->vectors);
     Py_ssize_t dimension = scan->dimension;
     double tolerance = (dimension + 8.0) * (4.0 * DBL_EPSILON);
     int screen = estimate_l2 != NULL && dimension >= 64 && dimension <= 4096 &&
                  dimension % 32 == 0 && limit < count;
     float threshold = 0.0f;
     for (Py_ssize_t i = 0; i < count; ++i) {
-        Py_ssize_t slot = slots == NULL ? i : slots[i];
-        if (slot >= size) {
-            PyErr_SetString(PyExc_ValueError, "invalid vector candidate slot");
+        Py_ssize_t slot = slots == NULL ? begin + i : slots[begin + i];
+        if (slot >= scan->count)
             return -1;
-        }
         const float *vector = scan->data[slot];
         if (screen && i >= limit) {
             float estimate = estimate_l2(vector, query, dimension);
@@ -349,6 +486,122 @@ static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const flo
     return 0;
 }
 
+#ifdef __linux__
+typedef struct {
+    const Scan *scan;
+    const float *query;
+    const uint32_t *slots;
+    Hit *hits;
+    Py_ssize_t first, count, limit;
+    int descending;
+    int status;
+} ScanJob;
+
+static struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t ready;
+    pthread_cond_t finished;
+    pthread_t thread;
+    ScanJob *job;
+    int started, stopping;
+} worker = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER};
+
+static int parallel_allowed;
+
+static int cpu_budget_allows_parallel(void)
+{
+    const char *threads = getenv("MVDB_SCAN_THREADS");
+    cpu_set_t cpus;
+    if ((threads != NULL && strcmp(threads, "1") == 0) ||
+        sched_getaffinity(0, sizeof(cpus), &cpus) != 0 || CPU_COUNT(&cpus) < 2)
+        return 0;
+    FILE *handle = fopen("/sys/fs/cgroup/cpu.max", "r");
+    if (handle == NULL)
+        return 1;
+    char quota[32];
+    long long period;
+    int fields = fscanf(handle, "%31s %lld", quota, &period);
+    fclose(handle);
+    return fields != 2 || strcmp(quota, "max") == 0 || strtoll(quota, NULL, 10) > period;
+}
+
+// Only the protocol thread accesses Python objects. Each job borrows immutable
+// vector bytes while the caller holds the GIL and waits for both scans to finish.
+static void *scan_worker(void *unused)
+{
+    pthread_mutex_lock(&worker.mutex);
+    while (!worker.stopping) {
+        if (worker.job == NULL) {
+            pthread_cond_wait(&worker.ready, &worker.mutex);
+            continue;
+        }
+        ScanJob *job = worker.job;
+        pthread_mutex_unlock(&worker.mutex);
+        job->status = collect_hits(job->hits, job->limit, job->scan, job->query,
+                                   job->slots, job->first, job->count, job->descending, 0);
+        pthread_mutex_lock(&worker.mutex);
+        worker.job = NULL;
+        pthread_cond_signal(&worker.finished);
+    }
+    pthread_mutex_unlock(&worker.mutex);
+    return NULL;
+}
+
+static void stop_worker(void *module)
+{
+    if (!worker.started)
+        return;
+    pthread_mutex_lock(&worker.mutex);
+    worker.stopping = 1;
+    pthread_cond_signal(&worker.ready);
+    pthread_mutex_unlock(&worker.mutex);
+    pthread_join(worker.thread, NULL);
+    worker.started = 0;
+    worker.stopping = 0;
+}
+
+static int collect_parallel(Hit *result, Py_ssize_t limit, const Scan *scan,
+                            const float *query, const uint32_t *slots,
+                            Py_ssize_t count, int descending)
+{
+    if (!worker.started) {
+        if (pthread_create(&worker.thread, NULL, scan_worker, NULL) != 0) {
+            parallel_allowed = 0;
+            return collect_hits(result, limit, scan, query, slots, 0, count, descending, 0);
+        }
+        worker.started = 1;
+    }
+    Hit *left = result + limit;
+    Hit *right = left + limit;
+    Py_ssize_t middle = count / 2;
+    ScanJob job = {scan, query, slots, right, middle, count - middle, limit, descending, 0};
+    pthread_mutex_lock(&worker.mutex);
+    worker.job = &job;
+    pthread_cond_signal(&worker.ready);
+    pthread_mutex_unlock(&worker.mutex);
+
+    int status = collect_hits(left, limit, scan, query, slots, 0, middle, descending, 0);
+    pthread_mutex_lock(&worker.mutex);
+    while (worker.job != NULL)
+        pthread_cond_wait(&worker.finished, &worker.mutex);
+    pthread_mutex_unlock(&worker.mutex);
+    if (status < 0 || job.status < 0)
+        return -1;
+    if (status != 0 || job.status != 0)
+        return 1;
+
+    double tolerance = (scan->dimension + 8.0) * (4.0 * DBL_EPSILON);
+    Py_ssize_t i = 0, j = 0;
+    for (Py_ssize_t out = 0; out < limit; ++out) {
+        // Both halves have at least K results, so their heads exist here.
+        if (ambiguous(left[i], right[j], scan, tolerance))
+            return 1;
+        result[out] = better(left[i], right[j], descending) ? left[i++] : right[j++];
+    }
+    return 0;
+}
+#endif
+
 static PyObject *topk(PyObject *self, PyObject *args)
 {
     PyObject *capsule, *query, *candidate_buffer;
@@ -363,8 +616,7 @@ static PyObject *topk(PyObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "invalid TopK arguments");
         return NULL;
     }
-    Py_ssize_t size = PyTuple_GET_SIZE(scan->vectors);
-    Py_ssize_t count = size;
+    Py_ssize_t count = scan->count;
     Py_buffer buffer = {0};
     if (candidate_buffer != Py_None) {
         if (PyObject_GetBuffer(candidate_buffer, &buffer, PyBUF_SIMPLE) < 0)
@@ -380,18 +632,31 @@ static PyObject *topk(PyObject *self, PyObject *args)
         result = PyList_New(0);
         goto done;
     }
-    if (limit > PY_SSIZE_T_MAX / (Py_ssize_t)sizeof(Hit) ||
-        (heap = PyMem_Malloc(limit * sizeof(Hit))) == NULL) {
+    int parallel = 0;
+#ifdef __linux__
+    parallel = parallel_allowed && limit <= 128 && count >= 4096 && scan->dimension >= 64;
+#endif
+    size_t workspace = sizeof(Hit) * (parallel ? 3 : 1);
+    if (limit > PY_SSIZE_T_MAX / (Py_ssize_t)workspace ||
+        (heap = PyMem_Malloc(limit * workspace)) == NULL) {
         PyErr_NoMemory();
         goto done;
     }
     const float *target = (const float *)PyBytes_AS_STRING(query);
-    int status = collect_hits(heap, limit, scan, target, slots, count, descending, 0);
+    int status;
+#ifdef __linux__
+    if (parallel)
+        status = collect_parallel(heap, limit, scan, target, slots, count, descending);
+    else
+#endif
+        status = collect_hits(heap, limit, scan, target, slots, 0, count, descending, 0);
     // SIMD may round differently when equally distant vectors have permuted dimensions.
     if (status > 0)
-        status = collect_hits(heap, limit, scan, target, slots, count, descending, 1);
-    if (status < 0)
+        status = collect_hits(heap, limit, scan, target, slots, 0, count, descending, 1);
+    if (status < 0) {
+        PyErr_SetString(PyExc_ValueError, "invalid vector candidate slot");
         goto done;
+    }
     result = PyList_New(limit);
     if (result == NULL)
         goto done;
@@ -413,13 +678,17 @@ done:
 
 static PyMethodDef methods[] = {
     {"parse_vector", parse_vector, METH_VARARGS, NULL},
+    {"parse_insert_rows", parse_insert_rows, METH_VARARGS, NULL},
     {"build_scan", build_scan, METH_VARARGS, NULL},
     {"topk", topk, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}
 };
 
 static struct PyModuleDef module = {
-    PyModuleDef_HEAD_INIT, "_mvdb_native", NULL, -1, methods
+    PyModuleDef_HEAD_INIT, "_mvdb_native", NULL, -1, methods,
+#ifdef __linux__
+    .m_free = stop_worker,
+#endif
 };
 
 PyMODINIT_FUNC PyInit__mvdb_native(void)
@@ -429,6 +698,9 @@ PyMODINIT_FUNC PyInit__mvdb_native(void)
         compute_squared_l2 = squared_l2_avx2;
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
         estimate_l2 = estimate_squared_l2;
+#endif
+#ifdef __linux__
+    parallel_allowed = cpu_budget_allows_parallel();
 #endif
     return PyModule_Create(&module);
 }

@@ -23,6 +23,7 @@ import array
 import bisect
 import functools
 import heapq
+import io
 import itertools
 import json
 import marshal
@@ -674,6 +675,12 @@ class Table:
         self._scan = None
         self._groups: dict[int, dict[Any, int | array.array] | None] = {}
         self._insert_pattern = None
+        self.native_schema = tuple(
+            0 if column.type == "BIGINT" else column.size if column.type == "VECTOR" else -column.size
+            for column in columns
+        )
+        if any(abs(size) > sys.maxsize for size in self.native_schema):
+            self.native_schema = None
 
     # -- schema -------------------------------------------------------
     def column_index(self, name: str) -> int:
@@ -1030,6 +1037,10 @@ class Database:
         if match := _INSERT_VALUES.match(sql):
             table = self.tables.get(match[1])
             if table is not None:
+                if _mvdb_native is not None and table.native_schema is not None:
+                    prepared = _mvdb_native.parse_insert_rows(sql, match.end(), table.native_schema)
+                    if prepared is not None:
+                        return self._insert_rows(table, prepared)
                 if rows := table.simple_insert_rows(sql, match.end()):
                     typed = ([self._coerce_literal(column,
                                                    int(value) if column.type == "BIGINT" else value[1:-1])
@@ -1550,10 +1561,15 @@ def serve(data_dir: str) -> int:
     database = Database(data_dir)
     database.open()
     stdout = sys.stdout
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    # Large INSERT requests can span many pipe reads. Read full binary lines
+    # before decoding each request once as UTF-8.
+    raw_stdin = io.FileIO(sys.stdin.fileno(), "rb", closefd=False)
+    stdin = io.BufferedReader(raw_stdin, buffer_size=128 * 1024)
     stdout.write('{"type":"ready"}\n')
     stdout.flush()
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
+    for raw_line in stdin:
+        line = raw_line.decode("utf-8").strip()
         if not line:
             continue
         try:
@@ -1571,13 +1587,13 @@ def serve(data_dir: str) -> int:
                 sys.stderr.write(f"shutdown failed: {exc}\n")
                 response = {"id": request_id, "ok": False,
                             "error": {"code": "internal_error", "message": str(exc)}}
-            stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+            stdout.write(encoder.encode(response) + "\n")
             stdout.flush()
             return 0
         if op != "execute":
-            stdout.write(json.dumps({"id": request_id, "ok": False,
-                                     "error": {"code": "unsupported_op",
-                                               "message": f"unsupported op {op}"}}) + "\n")
+            stdout.write(encoder.encode({"id": request_id, "ok": False,
+                                         "error": {"code": "unsupported_op",
+                                                   "message": f"unsupported op {op}"}}) + "\n")
             stdout.flush()
             continue
         sql = request.get("sql") or ""
@@ -1597,7 +1613,7 @@ def serve(data_dir: str) -> int:
             sys.stderr.write(f"internal error: {exc!r}\n")
             response = {"id": request_id, "ok": False,
                         "error": {"code": "internal_error", "message": str(exc)[:200]}}
-        stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+        stdout.write(encoder.encode(response) + "\n")
         stdout.flush()
     database.close()
     return 0

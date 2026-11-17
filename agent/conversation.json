@@ -7,7 +7,7 @@
     "date": "2026-11-17",
     "branch": "2026-competition-round2",
     "baseline_commit": "0b1db0d60dde47e3957455f17fb3e00b04f7e6a9",
-    "scope": "记录选手发起赛题、两轮平台反馈及编码 Agent 在此基础上进行的本地验证。保留与本题直接相关的原话和验证输出。已省略无关赛题、凭据以及未核实的历史技术摘要。",
+    "scope": "记录选手反馈、可核对的实验设计、原始输出和结果解释。第二轮基础版本为 a39ba49，材料提交之后的工程迭代在 latest_iteration 中给出。",
     "authorship": "role=user 为选手原话。role=agent 为编码 Agent 发言、实验预测或署名的技术分析。role=tool 为编码 Agent 执行命令得到的输出摘录。平台原分来自选手转述。"
   },
   "conversations": [
@@ -18,16 +18,10 @@
       "content": "完成新的试题赛题一：完成一个轻量向量数据库"
     },
     {
-      "id": "U4",
-      "role": "user",
-      "source": "首次实现后的选手原话",
-      "content": "ywx-sss/seekdb是另一个队伍的参考，不要剽窃！"
-    },
-    {
       "id": "U2",
       "role": "user",
-      "source": "首轮性能迭代前的选手原话",
-      "content": "这是之前的工作，现在的问题是，轻量向量数据库的跑分很低性能评测完成；原始指标 E = 578.767946。Agent Prompt评测完成；原始分 = 0.000000。其他队伍E可以打到5000多分，prompt也重新写，尽可能提高得分，github仓库在以往交互记录里有"
+      "source": "首轮性能反馈的原话摘录",
+      "content": "这是之前的工作，现在的问题是，轻量向量数据库的跑分很低性能评测完成；原始指标 E = 578.767946。Agent Prompt评测完成；原始分 = 0.000000。"
     },
     {
       "id": "A1",
@@ -98,6 +92,24 @@
       "role": "agent",
       "source": "执行过滤基数实验前的公开对话",
       "content": "我会把预测和结果解释直接补进材料，署名为 Agent。再做一组新的对照，检验上一版的等值过滤缓存超过 1,024 个不同值后，查询开销会怎么变，以及更新和回滚后查询结果是否正确。"
+    },
+    {
+      "id": "U8",
+      "role": "user",
+      "source": "本轮选手的请求摘录",
+      "content": "本轮提交后分数依然不理想"
+    },
+    {
+      "id": "U9",
+      "role": "user",
+      "source": "本轮选手的验收约束摘录",
+      "content": "注意提交次数有限，尽量升级到比较好的版本"
+    },
+    {
+      "id": "A8",
+      "role": "agent",
+      "source": "运行本轮试验前提出的预测",
+      "content": "我的预期是大候选集能提速，小候选集可能被线程唤醒开销抵消。验证会分别看这两组，以及分段交界处的并列排序。"
     }
   ],
   "platform_feedback": [
@@ -116,7 +128,7 @@
   "context": {
     "protocol": "题包通过 stdin/stdout JSON Lines 单客户端逐条提交 SQL。精确查询先过滤 WHERE，再取 L2 距离最小的 K 个主键，距离并列按主键升序。已响应成功的提交必须在进程强杀后恢复，未提交事务必须完全回滚。",
     "comparison": "本地基准为 10,000 行 × 128 维，每批 100 行，1,000 个 TopK=10，半数含普通列等值条件。老版与新版用相同数据和容器配额，基准自行用 float32 舍入和 math.dist 算独立真值。",
-    "participant_contribution": "选手规定独立实现，提供两次平台反馈，用其他队伍的 E 判断仍有改进空间，并要求增加实验预测与结果解释。"
+    "participant_contribution": "选手要求独立实现，提供两次平台反馈，要求增加实验预测和结果解释，并指出正式提交次数有限。"
   },
   "predictions_before_second_iteration": [
     {
@@ -381,7 +393,8 @@
   "limitations": [
     "本地公开检查与生成向量基准是实际执行的编码 Agent 工具结果。第二轮迭代后的平台隐藏用例和正式原始分尚待评测。",
     "数据库行数据驻留内存。ANN 模式复用精确扫描。",
-    "第二轮实验预测、运行和解释由编码 Agent 提出并执行。选手原话和反馈保留在 conversations，材料没有记录到选手独立提出预测或解释本轮实验。"
+    "第二轮实验预测、运行和解释由编码 Agent 提出并执行。选手原话和反馈保留在 conversations，材料没有记录到选手独立提出预测或解释本轮实验。",
+    "latest_iteration 中的预测、运行和分析由编码 Agent 完成。提交者的原话保留在 conversations。"
   ],
   "additional_predictions": [
     {
@@ -390,5 +403,91 @@
       "hypothesis": "固定 8,192 行并使用二维向量排除 AVX2/FMA 粗筛影响时，2,048 种等值过滤值超过旧版缓存阈值，旧版每次查询需要重新遍历行。预测该场景的新旧 p50 比值至少是 10 种过滤值场景的 2 倍。事务内把主键 0 移到空组，查询应立即命中该行，回滚后空组应恢复为空。",
       "test": "对每个版本的 10 组和 2,048 组各交错运行 3 轮。在两组中用相同的 8 个标签和 240 个预热后 TopK 请求，对照 Python 独立计算的候选集合和距离，另检查更新前、事务中和回滚后的空组结果。"
     }
-  ]
+  ],
+  "latest_iteration": {
+    "comparison_base": "a39ba49f98eecd4abc97e2e3a3dcca9b492bca6c",
+    "validation_gate": "以本项目上一版镜像作为对照。先做握手、公开题包和故障恢复，再运行三轮交错对照与另一种输入分布的全量真值核对。",
+    "predictions": [
+      {
+        "id": "P8",
+        "role": "agent",
+        "hypothesis": "候选较多时分两段并行扫描可以降低无过滤查询延迟。较小候选集的线程唤醒成本可能大于单线程计算成本。所有分段使用相同全序时，每段保留 K 个候选足以恢复全局 TopK。",
+        "test": "用同一镜像改变 MVDB_SCAN_THREADS，分别记录过滤与无过滤延迟。另构造近邻集中于一侧、两侧分别含并列者的 4,608 行数据，用独立真值核对不同 K 和排序方向。"
+      },
+      {
+        "id": "P9",
+        "role": "agent",
+        "hypothesis": "让 C 直接把普通批量 VALUES 解码成行，预计能减少写入 CPU。每批仍走原有的 WAL 帧和同步，设备 I/O 应基本相同。",
+        "test": "依次测上一版、只有双线程查询的镜像、再启用原生写入解析的镜像。用 UTF-8、转义、未提交回滚、溢出和批次末行异常检查分流是否保持语义。"
+      },
+      {
+        "id": "P10",
+        "role": "agent",
+        "hypothesis": "换成乱序主键和科学计数法后，解析提速仍应可观察。所有查询返回的有序 ID 和距离应与独立的 float32 向量真值一致。",
+        "test": "改用种子 137，乱序插入 10,000 个主键，以科学计数法发送向量。独立全量计算 1,000 条查询的真值。"
+      }
+    ],
+    "experiments": [
+      {
+        "id": "X13",
+        "role": "tool",
+        "operator": "编码 Agent",
+        "prediction": "P8",
+        "title": "同镜像单双线程与上一版三轮对照",
+        "command": "python3 verify/benchmark.py mvdb-round3-final mvdb-round4-single mvdb-round4-final --rounds 3 --protocol-probe 80",
+        "output": "新版关闭与启用并行的无过滤 p50 为 0.477 → 0.457 ms，有过滤 p50 为 0.378 → 0.380 ms。整批查询 0.442 → 0.436 s，查询容器 CPU 160120 → 178827 µs。",
+        "application_summary": "上一版到最终版：写入 0.251 → 0.201 s，查询 0.442 → 0.436 s，内存峰值 21.07 → 21.31 MiB。按同一口径取三轮中位数。",
+        "raw_benchmark_lines": [
+          "{\"image\": \"mvdb-round3-final\", \"round\": 1, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.5982121970000662, \"write_s\": 0.25888579999991634, \"query_s\": 0.45572877900031017, \"shutdown_s\": 0.30241471899989847, \"reopen_s\": 0.4568009120002898, \"write_peak_bytes\": 22056960, \"query_peak_bytes\": 22056960, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 84592, \"query_cpu_usec\": 166689, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.021956902995952987, \"protocol_probe_p50_ms\": 0.26265249971402227, \"protocol_probe_p95_ms\": 0.3384769997865078, \"write_requests\": 100, \"write_request_s\": 0.2587896409977475, \"write_p50_ms\": 2.4960089995147428, \"write_p95_ms\": 3.335906999382132, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.20017429802464903, \"filtered_query_p50_ms\": 0.38668599972879747, \"filtered_query_p95_ms\": 0.5052239994256524, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.2549145920065712, \"unfiltered_query_p50_ms\": 0.4950375000589702, \"unfiltered_query_p95_ms\": 0.6673919997410849, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round4-single\", \"round\": 1, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.4953187370001615, \"write_s\": 0.20221962300001906, \"query_s\": 0.43721285500032536, \"shutdown_s\": 0.24150108600042586, \"reopen_s\": 0.4899365229994146, \"write_peak_bytes\": 22331392, \"query_peak_bytes\": 22331392, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 46553, \"query_cpu_usec\": 160120, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.022591096999349247, \"protocol_probe_p50_ms\": 0.2700220002225251, \"protocol_probe_p95_ms\": 0.3566839995983173, \"write_requests\": 100, \"write_request_s\": 0.2021184019931752, \"write_p50_ms\": 1.9159910002599645, \"write_p95_ms\": 2.584331999969436, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.1901553019952189, \"filtered_query_p50_ms\": 0.3674459999274404, \"filtered_query_p95_ms\": 0.47511199954897165, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.24638785300339805, \"unfiltered_query_p50_ms\": 0.4686049996962538, \"unfiltered_query_p95_ms\": 0.6548709998241975, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round4-final\", \"round\": 1, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.47074097099994106, \"write_s\": 0.1947424489999321, \"query_s\": 0.4170952530002978, \"shutdown_s\": 0.33333615899937286, \"reopen_s\": 0.4480744219999906, \"write_peak_bytes\": 22343680, \"query_peak_bytes\": 22343680, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 44645, \"query_cpu_usec\": 169041, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.02189408400681714, \"protocol_probe_p50_ms\": 0.2614369996081223, \"protocol_probe_p95_ms\": 0.3528039997036103, \"write_requests\": 100, \"write_request_s\": 0.1946525129951624, \"write_p50_ms\": 1.8973515002471686, \"write_p95_ms\": 2.401734999693872, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.18857457600188354, \"filtered_query_p50_ms\": 0.36651949949373375, \"filtered_query_p95_ms\": 0.4618799994204892, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.22785578199182055, \"unfiltered_query_p50_ms\": 0.4423955001584545, \"unfiltered_query_p95_ms\": 0.562539999918954, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round3-final\", \"round\": 2, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.47710569799983205, \"write_s\": 0.24425248300030944, \"query_s\": 0.4411114210006417, \"shutdown_s\": 0.31250834000002214, \"reopen_s\": 0.5292195040001388, \"write_peak_bytes\": 22093824, \"query_peak_bytes\": 22093824, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 84466, \"query_cpu_usec\": 163129, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.02330498699848249, \"protocol_probe_p50_ms\": 0.2773324999907345, \"protocol_probe_p95_ms\": 0.38484200013044756, \"write_requests\": 100, \"write_request_s\": 0.24414866500137578, \"write_p50_ms\": 2.3140825001064513, \"write_p95_ms\": 2.949837999949523, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19253628400110756, \"filtered_query_p50_ms\": 0.3715950001605961, \"filtered_query_p95_ms\": 0.4691760004789103, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.24794452599599026, \"unfiltered_query_p50_ms\": 0.4753339999297168, \"unfiltered_query_p95_ms\": 0.6612390006921487, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round4-single\", \"round\": 2, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.5801251539996883, \"write_s\": 0.19372615100019175, \"query_s\": 0.44217169100011233, \"shutdown_s\": 0.3061856140002419, \"reopen_s\": 0.3806809139996403, \"write_peak_bytes\": 22269952, \"query_peak_bytes\": 22269952, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 45986, \"query_cpu_usec\": 158309, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.022373894998963806, \"protocol_probe_p50_ms\": 0.27293350012769224, \"protocol_probe_p95_ms\": 0.3355469998496119, \"write_requests\": 100, \"write_request_s\": 0.19362759899559023, \"write_p50_ms\": 1.9010824998986209, \"write_p95_ms\": 2.2844830000394722, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19509800099331187, \"filtered_query_p50_ms\": 0.37838349999219645, \"filtered_query_p95_ms\": 0.4986869998901966, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.24643272599678312, \"unfiltered_query_p50_ms\": 0.4770839996126597, \"unfiltered_query_p95_ms\": 0.6328050003503449, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round4-final\", \"round\": 2, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.6424681270000292, \"write_s\": 0.2020953709998139, \"query_s\": 0.4405540119996658, \"shutdown_s\": 0.26087128299968754, \"reopen_s\": 0.4726952259998143, \"write_peak_bytes\": 22183936, \"query_peak_bytes\": 22183936, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 46045, \"query_cpu_usec\": 182693, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.0221193069983201, \"protocol_probe_p50_ms\": 0.2682824997464195, \"protocol_probe_p95_ms\": 0.34241499997733627, \"write_requests\": 100, \"write_request_s\": 0.20199127899468294, \"write_p50_ms\": 1.983053000003565, \"write_p95_ms\": 2.588780000223778, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19990029399650666, \"filtered_query_p50_ms\": 0.38139099979161983, \"filtered_query_p95_ms\": 0.5114719997436623, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.23985875400649093, \"unfiltered_query_p50_ms\": 0.45909600021332153, \"unfiltered_query_p95_ms\": 0.6271960000958643, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round3-final\", \"round\": 3, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.4414199870006996, \"write_s\": 0.25127217899989773, \"query_s\": 0.441724780000186, \"shutdown_s\": 0.432434696999735, \"reopen_s\": 0.5413171520003743, \"write_peak_bytes\": 22093824, \"query_peak_bytes\": 22093824, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 88844, \"query_cpu_usec\": 164722, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.02235221000319143, \"protocol_probe_p50_ms\": 0.26906299990514526, \"protocol_probe_p95_ms\": 0.37347899979067734, \"write_requests\": 100, \"write_request_s\": 0.25116220000199974, \"write_p50_ms\": 2.4878680001165776, \"write_p95_ms\": 2.98143700001674, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19327800400333217, \"filtered_query_p50_ms\": 0.37396049992821645, \"filtered_query_p95_ms\": 0.46785400081716944, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.24776359599673015, \"unfiltered_query_p50_ms\": 0.47754249953868566, \"unfiltered_query_p95_ms\": 0.6626830008826801, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round4-single\", \"round\": 3, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.5085959910011297, \"write_s\": 0.2011679120005283, \"query_s\": 0.46152772099958383, \"shutdown_s\": 0.2801226369992946, \"reopen_s\": 0.551495571000487, \"write_peak_bytes\": 22470656, \"query_peak_bytes\": 22470656, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 47981, \"query_cpu_usec\": 170046, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.02418452299752971, \"protocol_probe_p50_ms\": 0.2887324999392149, \"protocol_probe_p95_ms\": 0.4361339997558389, \"write_requests\": 100, \"write_request_s\": 0.20106743998621823, \"write_p50_ms\": 1.972179999029322, \"write_p95_ms\": 2.4229519985965453, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.20248176097811665, \"filtered_query_p50_ms\": 0.39138950069173006, \"filtered_query_p95_ms\": 0.5292679998092353, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.2583272080155439, \"unfiltered_query_p50_ms\": 0.496823499815946, \"unfiltered_query_p95_ms\": 0.6907520000822842, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round4-final\", \"round\": 3, \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"startup_s\": 0.5286436050009797, \"write_s\": 0.20111970899961307, \"query_s\": 0.4357169649993011, \"shutdown_s\": 0.2940435159998742, \"reopen_s\": 0.4859787570003391, \"write_peak_bytes\": 22347776, \"query_peak_bytes\": 22347776, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 45586, \"query_cpu_usec\": 178827, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.022632178999629105, \"protocol_probe_p50_ms\": 0.27606850017036777, \"protocol_probe_p95_ms\": 0.3679469991766382, \"write_requests\": 100, \"write_request_s\": 0.20102917800977593, \"write_p50_ms\": 1.9382239997867146, \"write_p95_ms\": 2.615426999909687, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19906979700499505, \"filtered_query_p50_ms\": 0.38041749940020964, \"filtered_query_p95_ms\": 0.5098499987070682, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.2359084999989136, \"unfiltered_query_p50_ms\": 0.457156500488054, \"unfiltered_query_p95_ms\": 0.5904869994992623, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}",
+          "{\"image\": \"mvdb-round3-final\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.47710569799983205, \"write_s\": 0.25127217899989773, \"query_s\": 0.441724780000186, \"shutdown_s\": 0.31250834000002214, \"reopen_s\": 0.5292195040001388, \"write_peak_bytes\": 22093824, \"query_peak_bytes\": 22093824, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 84592, \"query_cpu_usec\": 164722, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.02235221000319143, \"protocol_probe_p50_ms\": 0.26906299990514526, \"protocol_probe_p95_ms\": 0.37347899979067734, \"write_requests\": 100, \"write_request_s\": 0.25116220000199974, \"write_p50_ms\": 2.4878680001165776, \"write_p95_ms\": 2.98143700001674, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19327800400333217, \"filtered_query_p50_ms\": 0.37396049992821645, \"filtered_query_p95_ms\": 0.4691760004789103, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.24794452599599026, \"unfiltered_query_p50_ms\": 0.47754249953868566, \"unfiltered_query_p95_ms\": 0.6626830008826801, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}",
+          "{\"image\": \"mvdb-round4-single\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.5085959910011297, \"write_s\": 0.2011679120005283, \"query_s\": 0.44217169100011233, \"shutdown_s\": 0.2801226369992946, \"reopen_s\": 0.4899365229994146, \"write_peak_bytes\": 22331392, \"query_peak_bytes\": 22331392, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 46553, \"query_cpu_usec\": 160120, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.022591096999349247, \"protocol_probe_p50_ms\": 0.27293350012769224, \"protocol_probe_p95_ms\": 0.3566839995983173, \"write_requests\": 100, \"write_request_s\": 0.20106743998621823, \"write_p50_ms\": 1.9159910002599645, \"write_p95_ms\": 2.4229519985965453, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19509800099331187, \"filtered_query_p50_ms\": 0.37838349999219645, \"filtered_query_p95_ms\": 0.4986869998901966, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.24643272599678312, \"unfiltered_query_p50_ms\": 0.4770839996126597, \"unfiltered_query_p95_ms\": 0.6548709998241975, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}",
+          "{\"image\": \"mvdb-round4-final\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.5286436050009797, \"write_s\": 0.20111970899961307, \"query_s\": 0.4357169649993011, \"shutdown_s\": 0.2940435159998742, \"reopen_s\": 0.4726952259998143, \"write_peak_bytes\": 22343680, \"query_peak_bytes\": 22343680, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 45586, \"query_cpu_usec\": 178827, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.0221193069983201, \"protocol_probe_p50_ms\": 0.2682824997464195, \"protocol_probe_p95_ms\": 0.3528039997036103, \"write_requests\": 100, \"write_request_s\": 0.20102917800977593, \"write_p50_ms\": 1.9382239997867146, \"write_p95_ms\": 2.588780000223778, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19906979700499505, \"filtered_query_p50_ms\": 0.38041749940020964, \"filtered_query_p95_ms\": 0.5098499987070682, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.2359084999989136, \"unfiltered_query_p50_ms\": 0.457156500488054, \"unfiltered_query_p95_ms\": 0.5904869994992623, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}"
+        ],
+        "analysis_role": "agent",
+        "analysis": "无过滤 p50 的方向符合预测。过滤组接近持平，整批收益受较小候选集和协议开销制约。线程增加了本地总 CPU 用量，峰值内存略升。保留分段阈值、单核配额检测和关闭开关。分段证明：某候选若在段内被至少 K 条记录排在前面，同一全序下这些记录在全局也都排在它前面，因此它进不了全局 TopK。距离并列时段内和段间均用主键排序，舍入无法明确区分时做精度复算。"
+      },
+      {
+        "id": "X14",
+        "role": "tool",
+        "operator": "编码 Agent",
+        "prediction": "P9",
+        "title": "用中间镜像定位写入 CPU 收益",
+        "command": "python3 verify/benchmark.py mvdb-round3-final mvdb-round4-parallel mvdb-round4-native --rounds 3 --protocol-probe 80",
+        "output": "三个版本写入 CPU 中位数为 85875、85574、45378 µs；写入设备 I/O 分别为 5738496、5738496、5738496 字节。",
+        "raw_medians": [
+          "{\"image\": \"mvdb-round3-final\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.4069545059992379, \"write_s\": 0.25026629099920683, \"query_s\": 0.4635082690001582, \"shutdown_s\": 0.24632851400019717, \"reopen_s\": 0.4099279400006708, \"write_peak_bytes\": 22188032, \"query_peak_bytes\": 22188032, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 85875, \"query_cpu_usec\": 171322, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.02305507700293674, \"protocol_probe_p50_ms\": 0.2742734995990759, \"protocol_probe_p95_ms\": 0.3892269996867981, \"write_requests\": 100, \"write_request_s\": 0.25015866899957473, \"write_p50_ms\": 2.458340999965003, \"write_p95_ms\": 2.936312000201724, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.2021901909929511, \"filtered_query_p50_ms\": 0.3929335002794687, \"filtered_query_p95_ms\": 0.5063809994680923, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.26067639500979567, \"unfiltered_query_p50_ms\": 0.5027144993619004, \"unfiltered_query_p95_ms\": 0.6810009999753674, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}",
+          "{\"image\": \"mvdb-round4-parallel\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.4267638009996517, \"write_s\": 0.25379382699975395, \"query_s\": 0.4370551299998624, \"shutdown_s\": 0.4267372329995851, \"reopen_s\": 0.4718218779999006, \"write_peak_bytes\": 21647360, \"query_peak_bytes\": 21647360, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 85574, \"query_cpu_usec\": 179997, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.022229227994102985, \"protocol_probe_p50_ms\": 0.2741529997365433, \"protocol_probe_p95_ms\": 0.3551939998942544, \"write_requests\": 100, \"write_request_s\": 0.253689207995194, \"write_p50_ms\": 2.489900000000489, \"write_p95_ms\": 3.0155399999785004, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19814031399619125, \"filtered_query_p50_ms\": 0.3818830000454909, \"filtered_query_p95_ms\": 0.5035459998907754, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.23827191699729156, \"unfiltered_query_p50_ms\": 0.4636554999706277, \"unfiltered_query_p95_ms\": 0.6246829998417525, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}",
+          "{\"image\": \"mvdb-round4-native\", \"seed\": 42, \"shuffle_keys\": false, \"exponential\": false, \"median\": {\"startup_s\": 0.47919589200046175, \"write_s\": 0.19682952699986345, \"query_s\": 0.4317488760007109, \"shutdown_s\": 0.23687025900017034, \"reopen_s\": 0.51521431799938, \"write_peak_bytes\": 21860352, \"query_peak_bytes\": 21860352, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 45378, \"query_cpu_usec\": 178935, \"protocol_probe_requests\": 80, \"protocol_probe_request_s\": 0.02214870899933885, \"protocol_probe_p50_ms\": 0.2672969994819141, \"protocol_probe_p95_ms\": 0.3572980003809789, \"write_requests\": 100, \"write_request_s\": 0.196734631000254, \"write_p50_ms\": 1.9155804998263193, \"write_p95_ms\": 2.3202100001071813, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.1966982430049029, \"filtered_query_p50_ms\": 0.3773425000872521, \"filtered_query_p95_ms\": 0.4981499996574712, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.23464401100227406, \"unfiltered_query_p50_ms\": 0.45440849999067723, \"unfiltered_query_p95_ms\": 0.5914280000069994, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 40}}"
+        ],
+        "analysis_role": "agent",
+        "analysis": "仅改变查询时，写入 CPU 基本持平。原生批量解析启用后降幅出现，说明写入 CPU 的主要变化来自解析路径。写入仍经原子性检查和 WAL 同步，数据大小与设备写入量相同。非法批次先完整解析或回退通用检查，再决定是否写入。"
+      },
+      {
+        "id": "X15",
+        "role": "tool",
+        "operator": "编码 Agent",
+        "prediction": "P10",
+        "title": "乱序主键、科学计数法与容器回归",
+        "command": "python3 verify/benchmark.py mvdb-round3-final mvdb-round4-final --rounds 1 --seed 137 --shuffle-keys --exponential --oracle-queries 1000\npython3 verify/regression.py mvdb-round4-final --legacy mvdb-round3-final\npython3 protocol_check/run.py --image mvdb-round4-final --output ../check/round4-public",
+        "output": "1,000/1,000 条查询独立全量核对通过。写入 0.336 → 0.263 s，查询 0.465 → 0.458 s。官方容器握手和 20/20 个公开用例通过。",
+        "native_and_recovery_output": "Recovery of snapshot/WAL from mvdb-round3-final: [[[16777216.0, 1.401298464324817e-45]]]\nFiltered TopK tie at K (ASC/DESC/ANN): [[3, 1.0], [6, 1.0]]\nExtreme float32 differences produce finite distances in exact order: [[3, 1.0000000694406173e+38], [2, 4.999999941554894e+38], [1, 6.0000000109955115e+38]]\nMixed-magnitude tie across SIMD and tail dimensions: [[1, 134217728.00000012]]\nPlain INSERT, parser fallback, rejected batches: [[-9223372036854775808, '甲,乙', [1.401298464324817e-45, 3.0]], [7, \"can't\", [2.0, 4.0]], [9, 'plain', [2.0, 4.0]]]\nNear-cutoff float32 scores, rebinding vector literal, filtered/unfiltered ASC/DESC: 8/8 PASS\nPartition merge, top-K cutoffs, cross-partition ties and equality filter: 12/12 PASS\nKill, partial WAL frame, reopen, commit, kill, reopen: [[-1, 0.0], [0, 0.0]]",
+        "raw_benchmark_lines": [
+          "{\"image\": \"mvdb-round3-final\", \"round\": 1, \"seed\": 137, \"shuffle_keys\": true, \"exponential\": true, \"startup_s\": 0.4098820950002846, \"write_s\": 0.3355908860012278, \"query_s\": 0.4654766470011964, \"shutdown_s\": 0.40210550499978126, \"reopen_s\": 0.4445386920015153, \"write_peak_bytes\": 22355968, \"query_peak_bytes\": 22355968, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 119136, \"query_cpu_usec\": 181876, \"write_requests\": 100, \"write_request_s\": 0.3354870340026537, \"write_p50_ms\": 3.281738499936182, \"write_p95_ms\": 3.79933500153129, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19839145800870028, \"filtered_query_p50_ms\": 0.3801610000664368, \"filtered_query_p95_ms\": 0.4991890000383137, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.2663840290188091, \"unfiltered_query_p50_ms\": 0.5114354999022908, \"unfiltered_query_p95_ms\": 0.6876560000819154, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}",
+          "{\"image\": \"mvdb-round4-final\", \"round\": 1, \"seed\": 137, \"shuffle_keys\": true, \"exponential\": true, \"startup_s\": 0.4502022329997999, \"write_s\": 0.26347299799999746, \"query_s\": 0.4577085780001653, \"shutdown_s\": 0.28317180299927713, \"reopen_s\": 0.431614774000991, \"write_peak_bytes\": 23195648, \"query_peak_bytes\": 23195648, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 62625, \"query_cpu_usec\": 202295, \"write_requests\": 100, \"write_request_s\": 0.26336570799321635, \"write_p50_ms\": 2.6011385007223, \"write_p95_ms\": 2.978099000756629, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.2038298620173009, \"filtered_query_p50_ms\": 0.39156550064944895, \"filtered_query_p95_ms\": 0.5371499992179452, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.25315664298796037, \"unfiltered_query_p50_ms\": 0.4895919992122799, \"unfiltered_query_p95_ms\": 0.6592950012418441, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}",
+          "{\"image\": \"mvdb-round3-final\", \"seed\": 137, \"shuffle_keys\": true, \"exponential\": true, \"median\": {\"startup_s\": 0.4098820950002846, \"write_s\": 0.3355908860012278, \"query_s\": 0.4654766470011964, \"shutdown_s\": 0.40210550499978126, \"reopen_s\": 0.4445386920015153, \"write_peak_bytes\": 22355968, \"query_peak_bytes\": 22355968, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 119136, \"query_cpu_usec\": 181876, \"write_requests\": 100, \"write_request_s\": 0.3354870340026537, \"write_p50_ms\": 3.281738499936182, \"write_p95_ms\": 3.79933500153129, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.19839145800870028, \"filtered_query_p50_ms\": 0.3801610000664368, \"filtered_query_p95_ms\": 0.4991890000383137, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.2663840290188091, \"unfiltered_query_p50_ms\": 0.5114354999022908, \"unfiltered_query_p95_ms\": 0.6876560000819154, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}}",
+          "{\"image\": \"mvdb-round4-final\", \"seed\": 137, \"shuffle_keys\": true, \"exponential\": true, \"median\": {\"startup_s\": 0.4502022329997999, \"write_s\": 0.26347299799999746, \"query_s\": 0.4577085780001653, \"shutdown_s\": 0.28317180299927713, \"reopen_s\": 0.431614774000991, \"write_peak_bytes\": 23195648, \"query_peak_bytes\": 23195648, \"write_device_io_bytes\": 5738496, \"query_device_io_bytes\": 5742592, \"query_only_device_io_bytes\": 0, \"write_cpu_usec\": 62625, \"query_cpu_usec\": 202295, \"write_requests\": 100, \"write_request_s\": 0.26336570799321635, \"write_p50_ms\": 2.6011385007223, \"write_p95_ms\": 2.978099000756629, \"filtered_query_requests\": 500, \"filtered_query_request_s\": 0.2038298620173009, \"filtered_query_p50_ms\": 0.39156550064944895, \"filtered_query_p95_ms\": 0.5371499992179452, \"unfiltered_query_requests\": 500, \"unfiltered_query_request_s\": 0.25315664298796037, \"unfiltered_query_p50_ms\": 0.4895919992122799, \"unfiltered_query_p95_ms\": 0.6592950012418441, \"data_bytes_before_shutdown\": 5326461, \"data_bytes_after_shutdown\": 5326461, \"checked_exact_queries\": 1000}}"
+        ],
+        "analysis_role": "agent",
+        "analysis": "切换随机种子、插入顺序和数值表示后仍通过真值校验。回归分别覆盖跨段并列、升降序、不同 K、过滤、旧 WAL 重启和强杀再提交。测试说明当前数据下功能和提速可复现。正式运行资源、数据及 E 继续以评测平台为准。"
+      }
+    ]
+  }
 }
