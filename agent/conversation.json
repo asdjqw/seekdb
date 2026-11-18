@@ -110,6 +110,18 @@
       "role": "agent",
       "source": "运行本轮试验前提出的预测",
       "content": "我的预期是大候选集能提速，小候选集可能被线程唤醒开销抵消。验证会分别看这两组，以及分段交界处的并列排序。"
+    },
+    {
+      "id": "U10",
+      "role": "user",
+      "source": "本轮验收约束原话摘录",
+      "content": "查询只快了1%左右，还是不够。先别占正式提测次数，继续优化 TopK，拿同机对照和完整回归验证后再推一个提升明显的版本"
+    },
+    {
+      "id": "A9",
+      "role": "agent",
+      "source": "本轮开始时的实验设计",
+      "content": "我会以 `1e4414f` 为基线，重点试验能少读原始向量的精确 TopK。先用独立真值验证筛选是否安全，再看同机端到端收益和内存代价。达到明显提升才推送，整个过程只跑本地测试。"
     }
   ],
   "platform_feedback": [
@@ -487,6 +499,628 @@
         ],
         "analysis_role": "agent",
         "analysis": "切换随机种子、插入顺序和数值表示后仍通过真值校验。回归分别覆盖跨段并列、升降序、不同 K、过滤、旧 WAL 重启和强杀再提交。测试说明当前数据下功能和提速可复现。正式运行资源、数据及 E 继续以评测平台为准。"
+      }
+    ]
+  },
+  "topk_iteration": {
+    "date": "2026-11-18",
+    "comparison_base": "1e4414f3f6c8b9eef27a21355eccde442f1559e8",
+    "protocol": "标准 JSONL 完整请求与响应，10,000 条 128 维向量，1,000 次 TopK，K=10。有无普通列等值过滤各占一半。同机分别在外部 Docker 管道和容器内子进程管道测试，两个口径的时间各自对比。",
+    "predictions": [
+      {
+        "id": "P11",
+        "role": "agent",
+        "hypothesis": "整数粗筛读取的数据更少，但每个候选额外的整数点积、阈值计算和精算可能抵消收益。只有在端到端或直接执行器对照里真实加快，才保留紧凑编码。"
+      },
+      {
+        "id": "P12",
+        "role": "agent",
+        "hypothesis": "L2 平方和由非负项累积，部分距离超过带误差保护的堆门槛时，继续累加不会成为近邻。粗筛提前退出可能少算一段，额外横向归约和分支也可能增加 CPU。"
+      },
+      {
+        "id": "P13",
+        "role": "agent",
+        "hypothesis": "用表对象绑定好的列位置和投影复用执行计划，以及展开常用维度的距离循环，应该同时减少过滤和无过滤的查询开销。改用不同种子、乱序主键和另一种数值表示后，结果仍应逐条匹配独立精确真值。"
+      }
+    ],
+    "experiments": [
+      {
+        "id": "X16",
+        "role": "tool",
+        "operator": "编码 Agent",
+        "prediction": "P11",
+        "title": "整数粗筛与八行分块的两次反例",
+        "output": "逐行整数筛选的三轮容器中位数 0.685 → 0.700 s，查询 CPU 350778 → 440038 µs。八行块原型跳过 JSONL 协议和进程间通信，直接调用同一 SQL 执行器，交错两组的合并中位数为 0.077 → 0.097 s。",
+        "raw_docker_medians": [
+          {
+            "query_s": 0.6851786129991524,
+            "query_cpu_usec": 350778,
+            "query_peak_bytes": 22126592,
+            "filtered_p50_ms": 0.4907380007352913,
+            "unfiltered_p50_ms": 0.6519340004160767,
+            "protocol_probe_p50_ms": 0.36036750043422217,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.2831206969985942
+          },
+          {
+            "query_s": 0.6995627020005486,
+            "query_cpu_usec": 440038,
+            "query_peak_bytes": 22069248,
+            "filtered_p50_ms": 0.5434789991340949,
+            "unfiltered_p50_ms": 0.7526014996983577,
+            "protocol_probe_p50_ms": 0.32146950070455205,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.26810058200135245
+          }
+        ],
+        "raw_executor_trials": [
+          {
+            "image": "mvdb-round4-final",
+            "round": 1,
+            "wall_s": 0.07593021699722158,
+            "sql_cpu_s": 0.09702873000000001
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 2,
+            "wall_s": 0.07983030699688243,
+            "sql_cpu_s": 0.10141913000000002
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 3,
+            "wall_s": 0.07672744499723194,
+            "sql_cpu_s": 0.0979353300000001
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 4,
+            "wall_s": 0.08492420100083109,
+            "sql_cpu_s": 0.10329284400000005
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 5,
+            "wall_s": 0.08075127600022824,
+            "sql_cpu_s": 0.10193738800000007
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 1,
+            "wall_s": 0.10233540100307437,
+            "sql_cpu_s": 0.1498048110000001
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 2,
+            "wall_s": 0.09318669499771204,
+            "sql_cpu_s": 0.14128546199999992
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 3,
+            "wall_s": 0.09610541699657915,
+            "sql_cpu_s": 0.14437727200000006
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 4,
+            "wall_s": 0.09676733499509282,
+            "sql_cpu_s": 0.14538677900000008
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 5,
+            "wall_s": 0.09660427199560218,
+            "sql_cpu_s": 0.14607738799999992
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 1,
+            "wall_s": 0.07614469300460769,
+            "sql_cpu_s": 0.095818988
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 2,
+            "wall_s": 0.07771538000088185,
+            "sql_cpu_s": 0.09947408099999988
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 3,
+            "wall_s": 0.0729974569985643,
+            "sql_cpu_s": 0.0939775759999999
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 4,
+            "wall_s": 0.07442216100025689,
+            "sql_cpu_s": 0.09537112000000003
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 5,
+            "wall_s": 0.07655456800421234,
+            "sql_cpu_s": 0.09713432000000011
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 1,
+            "wall_s": 0.0917524750038865,
+            "sql_cpu_s": 0.1388791749999998
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 2,
+            "wall_s": 0.08965048200479941,
+            "sql_cpu_s": 0.13671982199999988
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 3,
+            "wall_s": 0.10083344799932092,
+            "sql_cpu_s": 0.14867223000000007
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 4,
+            "wall_s": 0.10891298700153129,
+            "sql_cpu_s": 0.15751336399999993
+          },
+          {
+            "image": "mvdb-round5-block",
+            "round": 5,
+            "wall_s": 0.10488502099906327,
+            "sql_cpu_s": 0.15556677799999985
+          }
+        ],
+        "analysis_role": "agent",
+        "analysis": "两种实现都没有换来可交付的速度收益。编码读取量减少只是一个机制指标。整数归约和通过保守界后的复算依然有代价。当前实验只能观察总耗时，无法单独归因各个成本，因此将整个整数编码方案撤回。"
+      },
+      {
+        "id": "X17",
+        "role": "tool",
+        "operator": "编码 Agent",
+        "prediction": "P12",
+        "title": "部分维度提前结束筛选",
+        "output": "带提前退出的五轮整批查询中位数 0.422 → 0.416 s，查询 CPU 171581 → 174159 µs。",
+        "analysis_role": "agent",
+        "analysis": "端到端变化较小，CPU 反而上升。一次额外横向归约和条件跳转可能抵消了省下的尾部计算。保留原误差界与距离计算顺序，转为减少动态宽度的循环开销。"
+      },
+      {
+        "id": "X18",
+        "role": "tool",
+        "operator": "编码 Agent",
+        "prediction": "P13",
+        "title": "执行计划复用与固定宽度距离循环的最终对照",
+        "command": "python3 verify/benchmark.py mvdb-round4-final mvdb-round5-width --rounds 5 --protocol-probe 100\n容器内运行 python /project/verify/pipe_benchmark.py",
+        "output": "外部 Docker 管道五轮：1,000 次查询 0.413 → 0.388 s（下降 6.2%），查询 CPU 167177 → 139329 µs。有过滤 p50 0.368 → 0.344 ms，无过滤 p50 0.431 → 0.406 ms。容器内子进程 JSONL 管道在两组交错对照中的合并中位数为 0.170 → 0.154 s。",
+        "docker_observations": [
+          {
+            "image": "mvdb-round4-final",
+            "round": 1,
+            "query_s": 0.4122884949974832,
+            "query_cpu_usec": 167177,
+            "query_peak_bytes": 22450176,
+            "filtered_p50_ms": 0.3605959973356221,
+            "unfiltered_p50_ms": 0.42954149830620736,
+            "protocol_probe_p50_ms": 0.2502690003893804,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.2194578510025167
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 1,
+            "query_s": 0.3875721189979231,
+            "query_cpu_usec": 139329,
+            "query_peak_bytes": 22110208,
+            "filtered_p50_ms": 0.34355999741819687,
+            "unfiltered_p50_ms": 0.406142498832196,
+            "protocol_probe_p50_ms": 0.25383349930052646,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.20052710700110765
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 2,
+            "query_s": 0.41297479499917245,
+            "query_cpu_usec": 165323,
+            "query_peak_bytes": 22056960,
+            "filtered_p50_ms": 0.36801299938815646,
+            "unfiltered_p50_ms": 0.4309110008762218,
+            "protocol_probe_p50_ms": 0.26355050431448035,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.21099494100053562
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 2,
+            "query_s": 0.3830425709966221,
+            "query_cpu_usec": 137788,
+            "query_peak_bytes": 22007808,
+            "filtered_p50_ms": 0.3394665036466904,
+            "unfiltered_p50_ms": 0.40116950185620226,
+            "protocol_probe_p50_ms": 0.2617155005282257,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.21477392099768622
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 3,
+            "query_s": 0.42190321299858624,
+            "query_cpu_usec": 169638,
+            "query_peak_bytes": 22110208,
+            "filtered_p50_ms": 0.37171750227571465,
+            "unfiltered_p50_ms": 0.4425545012054499,
+            "protocol_probe_p50_ms": 0.2678404998732731,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.22060252699884586
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 3,
+            "query_s": 0.39278561800165335,
+            "query_cpu_usec": 141378,
+            "query_peak_bytes": 22360064,
+            "filtered_p50_ms": 0.34651599708013237,
+            "unfiltered_p50_ms": 0.40804300078889355,
+            "protocol_probe_p50_ms": 0.2507645003788639,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.20169650800380623
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 4,
+            "query_s": 0.43813631599914515,
+            "query_cpu_usec": 180761,
+            "query_peak_bytes": 22085632,
+            "filtered_p50_ms": 0.3823574988928158,
+            "unfiltered_p50_ms": 0.4574925005726982,
+            "protocol_probe_p50_ms": 0.2855255006579682,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.2127264809969347
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 4,
+            "query_s": 0.4025426900043385,
+            "query_cpu_usec": 144210,
+            "query_peak_bytes": 22749184,
+            "filtered_p50_ms": 0.3507919973344542,
+            "unfiltered_p50_ms": 0.4161055003351066,
+            "protocol_probe_p50_ms": 0.27345849957782775,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.21500547000323422
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 5,
+            "query_s": 0.41024334100075066,
+            "query_cpu_usec": 164948,
+            "query_peak_bytes": 22327296,
+            "filtered_p50_ms": 0.360427497071214,
+            "unfiltered_p50_ms": 0.42778650094987825,
+            "protocol_probe_p50_ms": 0.25821549934335053,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.20551628899556817
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 5,
+            "query_s": 0.38376568500098074,
+            "query_cpu_usec": 137362,
+            "query_peak_bytes": 22319104,
+            "filtered_p50_ms": 0.3410594981687609,
+            "unfiltered_p50_ms": 0.3994839971710462,
+            "protocol_probe_p50_ms": 0.2635314995131921,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 40,
+            "write_s": 0.22877716399671044
+          }
+        ],
+        "pipe_observations": [
+          {
+            "image": "mvdb-round4-final",
+            "round": 1,
+            "query_s": 0.1670428100042045,
+            "filtered_p50_ms": 0.1195719996758271,
+            "unfiltered_p50_ms": 0.17819449931266718,
+            "protocol_probe_p50_ms": 0.06058649887563661
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 2,
+            "query_s": 0.16907021999941207,
+            "filtered_p50_ms": 0.12130899995099753,
+            "unfiltered_p50_ms": 0.18006700338446535,
+            "protocol_probe_p50_ms": 0.06188049883348867
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 3,
+            "query_s": 0.16816081399883842,
+            "filtered_p50_ms": 0.12115899517084472,
+            "unfiltered_p50_ms": 0.18087200078298338,
+            "protocol_probe_p50_ms": 0.05982499715173617
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 4,
+            "query_s": 0.17455347999930382,
+            "filtered_p50_ms": 0.12229849744471721,
+            "unfiltered_p50_ms": 0.18613799693412147,
+            "protocol_probe_p50_ms": 0.059693997172871605
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 5,
+            "query_s": 0.17352270599803887,
+            "filtered_p50_ms": 0.12179349869256839,
+            "unfiltered_p50_ms": 0.18280599761055782,
+            "protocol_probe_p50_ms": 0.059815498389070854
+          },
+          {
+            "image": "mvdb-round5-plan",
+            "round": 1,
+            "query_s": 0.1631140579993371,
+            "filtered_p50_ms": 0.11212149911443703,
+            "unfiltered_p50_ms": 0.17545300215715542,
+            "protocol_probe_p50_ms": 0.059229998441878706
+          },
+          {
+            "image": "mvdb-round5-plan",
+            "round": 2,
+            "query_s": 0.1668309570013662,
+            "filtered_p50_ms": 0.11964500299654901,
+            "unfiltered_p50_ms": 0.18568100131233223,
+            "protocol_probe_p50_ms": 0.06088699956308119
+          },
+          {
+            "image": "mvdb-round5-plan",
+            "round": 3,
+            "query_s": 0.161451735002629,
+            "filtered_p50_ms": 0.11090849875472486,
+            "unfiltered_p50_ms": 0.1761914973030798,
+            "protocol_probe_p50_ms": 0.074487499659881
+          },
+          {
+            "image": "mvdb-round5-plan",
+            "round": 4,
+            "query_s": 0.16134998000052292,
+            "filtered_p50_ms": 0.10878900138777681,
+            "unfiltered_p50_ms": 0.17252650286536664,
+            "protocol_probe_p50_ms": 0.06146249870653264
+          },
+          {
+            "image": "mvdb-round5-plan",
+            "round": 5,
+            "query_s": 0.15994213899830356,
+            "filtered_p50_ms": 0.11069399988627993,
+            "unfiltered_p50_ms": 0.17914900308824144,
+            "protocol_probe_p50_ms": 0.06290899909799919
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 1,
+            "query_s": 0.1430088870038162,
+            "filtered_p50_ms": 0.10335499973734841,
+            "unfiltered_p50_ms": 0.156940001033945,
+            "protocol_probe_p50_ms": 0.06007950287312269
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 2,
+            "query_s": 0.15034741300041787,
+            "filtered_p50_ms": 0.10495550304767676,
+            "unfiltered_p50_ms": 0.16141899686772376,
+            "protocol_probe_p50_ms": 0.05831649468746036
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 3,
+            "query_s": 0.15383820600254694,
+            "filtered_p50_ms": 0.10627499796100892,
+            "unfiltered_p50_ms": 0.16308749763993546,
+            "protocol_probe_p50_ms": 0.06041749657015316
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 4,
+            "query_s": 0.15417012400575913,
+            "filtered_p50_ms": 0.10700550046749413,
+            "unfiltered_p50_ms": 0.16372150275856256,
+            "protocol_probe_p50_ms": 0.06171000131871551
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 5,
+            "query_s": 0.15340541199839208,
+            "filtered_p50_ms": 0.10580799789750017,
+            "unfiltered_p50_ms": 0.1630650003789924,
+            "protocol_probe_p50_ms": 0.06314199708867818
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 1,
+            "query_s": 0.16790271300124004,
+            "filtered_p50_ms": 0.12215700189699419,
+            "unfiltered_p50_ms": 0.18080749578075483,
+            "protocol_probe_p50_ms": 0.06817149915150367
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 2,
+            "query_s": 0.17690474200207973,
+            "filtered_p50_ms": 0.12540199895738624,
+            "unfiltered_p50_ms": 0.18850200285669416,
+            "protocol_probe_p50_ms": 0.062458999309455976
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 3,
+            "query_s": 0.1712420569965616,
+            "filtered_p50_ms": 0.12267450074432418,
+            "unfiltered_p50_ms": 0.18168449605582282,
+            "protocol_probe_p50_ms": 0.06477300121332519
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 4,
+            "query_s": 0.16627569800039055,
+            "filtered_p50_ms": 0.1200794977194164,
+            "unfiltered_p50_ms": 0.17837449922808446,
+            "protocol_probe_p50_ms": 0.05500450060935691
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 5,
+            "query_s": 0.171529154999007,
+            "filtered_p50_ms": 0.12274149776203558,
+            "unfiltered_p50_ms": 0.18233549781143665,
+            "protocol_probe_p50_ms": 0.08053549754549749
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 1,
+            "query_s": 0.15066249899973627,
+            "filtered_p50_ms": 0.10592550097499043,
+            "unfiltered_p50_ms": 0.16305100143654272,
+            "protocol_probe_p50_ms": 0.057573495723772794
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 2,
+            "query_s": 0.14960083900223253,
+            "filtered_p50_ms": 0.10470699635334313,
+            "unfiltered_p50_ms": 0.16231350309681147,
+            "protocol_probe_p50_ms": 0.06050599768059328
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 3,
+            "query_s": 0.15522980499372352,
+            "filtered_p50_ms": 0.10979100261465646,
+            "unfiltered_p50_ms": 0.1706139992165845,
+            "protocol_probe_p50_ms": 0.06171600034576841
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 4,
+            "query_s": 0.15432835899991915,
+            "filtered_p50_ms": 0.10686699897632934,
+            "unfiltered_p50_ms": 0.16335899999830872,
+            "protocol_probe_p50_ms": 0.059282501752022654
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 5,
+            "query_s": 0.15561820899893064,
+            "filtered_p50_ms": 0.10755450057331473,
+            "unfiltered_p50_ms": 0.168652997672325,
+            "protocol_probe_p50_ms": 0.06757949813618325
+          }
+        ],
+        "analysis_role": "agent",
+        "analysis": "缓存的内容是列位置、比较条件和投影。每次由当前向量参数和可见行重新产生有序结果。固定 128 维的 SIMD 循环可在编译时展开，沿用原始精确阈值。两种管道方式走势一致，外部转发的固定开销使端到端百分比更小。峰值内存略升，设备 I/O 持平。"
+      },
+      {
+        "id": "X19",
+        "role": "tool",
+        "operator": "编码 Agent",
+        "prediction": "P13",
+        "title": "随机种子与数值写法变化、完整真值与故障回归",
+        "command": "python3 verify/benchmark.py mvdb-round4-final mvdb-round5-width --rounds 3 --seed 359 --shuffle-keys --exponential --oracle-queries 1000\npython3 protocol_check/run.py --image mvdb-round5-width --output ../check/round5-public\npython3 verify/regression.py mvdb-round5-width --legacy mvdb-round4-final",
+        "output": "乱序主键和科学计数法的三轮查询中位数 0.488 → 0.435 s（下降 10.9%）。两版每轮 1,000 个查询的 ID 与距离都通过独立全量核对。镜像握手和 20/20 个公开用例通过。",
+        "docker_observations": [
+          {
+            "image": "mvdb-round4-final",
+            "round": 1,
+            "query_s": 0.4927841239987174,
+            "query_cpu_usec": 220511,
+            "query_peak_bytes": 23224320,
+            "filtered_p50_ms": 0.42170649976469576,
+            "unfiltered_p50_ms": 0.5314884983818047,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 1000,
+            "write_s": 0.28809201100375503
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 1,
+            "query_s": 0.42917684499843745,
+            "query_cpu_usec": 170135,
+            "query_peak_bytes": 23011328,
+            "filtered_p50_ms": 0.37384600000223145,
+            "unfiltered_p50_ms": 0.4589509990182705,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 1000,
+            "write_s": 0.2871424670011038
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 2,
+            "query_s": 0.48814739400404505,
+            "query_cpu_usec": 210263,
+            "query_peak_bytes": 22831104,
+            "filtered_p50_ms": 0.41802450505201705,
+            "unfiltered_p50_ms": 0.5186249982216395,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 1000,
+            "write_s": 0.3123575770005118
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 2,
+            "query_s": 0.44755935500143096,
+            "query_cpu_usec": 181302,
+            "query_peak_bytes": 22740992,
+            "filtered_p50_ms": 0.3796245000557974,
+            "unfiltered_p50_ms": 0.48064650036394596,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 1000,
+            "write_s": 0.28440345900162356
+          },
+          {
+            "image": "mvdb-round4-final",
+            "round": 3,
+            "query_s": 0.4659301959982258,
+            "query_cpu_usec": 201718,
+            "query_peak_bytes": 22777856,
+            "filtered_p50_ms": 0.4013874968222808,
+            "unfiltered_p50_ms": 0.5035505018895492,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 1000,
+            "write_s": 0.2872360509936698
+          },
+          {
+            "image": "mvdb-round5-width",
+            "round": 3,
+            "query_s": 0.4351313150036731,
+            "query_cpu_usec": 173547,
+            "query_peak_bytes": 23080960,
+            "filtered_p50_ms": 0.3732170007424429,
+            "unfiltered_p50_ms": 0.46400749852182344,
+            "query_device_io_bytes": 5742592,
+            "checked_exact_queries": 1000,
+            "write_s": 0.296723089995794
+          }
+        ],
+        "native_oracle_output": "mvdb-round5-width\nDifferential results checked against Python math.dist: 640",
+        "regression_output": "Recovery of snapshot/WAL from mvdb-round4-final: [[[16777216.0, 1.401298464324817e-45]]]\nFiltered TopK tie at K (ASC/DESC/ANN): [[3, 1.0], [6, 1.0]]\nExtreme float32 differences produce finite distances in exact order: [[3, 1.0000000694406173e+38], [2, 4.999999941554894e+38], [1, 6.0000000109955115e+38]]\nMixed-magnitude tie across SIMD and tail dimensions: [[1, 134217728.00000012]]\nPlain INSERT, parser fallback, rejected batches: [[-9223372036854775808, '甲,乙', [1.401298464324817e-45, 3.0]], [7, \"can't\", [2.0, 4.0]], [9, 'plain', [2.0, 4.0]]]\nNear-cutoff float32 scores, rebinding vector literal, filtered/unfiltered ASC/DESC: 8/8 PASS\nPartition merge, top-K cutoffs, cross-partition ties and equality filter: 12/12 PASS\nTopK plan target rebinding, projection order, predicate fallback and DROP/CREATE: PASS\nKill, partial WAL frame, reopen, commit, kill, reopen: [[-1, 0.0], [0, 0.0]]",
+        "analysis_role": "agent",
+        "analysis": "重绑测试交替使用两个查询向量，核对投影顺序、组合过滤及同名表删除重建后列位置改变。旧数据恢复、跨段并列、极端浮点数和原子提交均通过。正式平台评分尚未产生。"
       }
     ]
   }

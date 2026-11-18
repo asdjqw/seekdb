@@ -352,32 +352,54 @@ static double squared_l2_avx2(const float *row, const float *query, Py_ssize_t d
            squared_l2(row + i, query + i, dimension - i);
 }
 
+typedef struct {
+    __m256 a, b, c, d;
+} DistanceLanes;
+
 __attribute__((target("avx2,fma")))
-static float estimate_squared_l2(const float *row, const float *query, Py_ssize_t dimension)
+static inline DistanceLanes accumulate_l2(const float *row, const float *query,
+                                           Py_ssize_t first, Py_ssize_t stop, DistanceLanes acc)
 {
-    __m256 a = _mm256_setzero_ps();
-    __m256 b = _mm256_setzero_ps();
-    __m256 c = _mm256_setzero_ps();
-    __m256 d = _mm256_setzero_ps();
-    for (Py_ssize_t i = 0; i < dimension; i += 32) {
+    for (Py_ssize_t i = first; i < stop; i += 32) {
         __m256 x = _mm256_sub_ps(_mm256_loadu_ps(row + i), _mm256_loadu_ps(query + i));
         __m256 y = _mm256_sub_ps(_mm256_loadu_ps(row + i + 8), _mm256_loadu_ps(query + i + 8));
         __m256 z = _mm256_sub_ps(_mm256_loadu_ps(row + i + 16), _mm256_loadu_ps(query + i + 16));
         __m256 w = _mm256_sub_ps(_mm256_loadu_ps(row + i + 24), _mm256_loadu_ps(query + i + 24));
-        a = _mm256_fmadd_ps(x, x, a);
-        b = _mm256_fmadd_ps(y, y, b);
-        c = _mm256_fmadd_ps(z, z, c);
-        d = _mm256_fmadd_ps(w, w, d);
+        acc.a = _mm256_fmadd_ps(x, x, acc.a);
+        acc.b = _mm256_fmadd_ps(y, y, acc.b);
+        acc.c = _mm256_fmadd_ps(z, z, acc.c);
+        acc.d = _mm256_fmadd_ps(w, w, acc.d);
     }
-    __m256 total = _mm256_add_ps(_mm256_add_ps(a, b), _mm256_add_ps(c, d));
+    return acc;
+}
+
+__attribute__((target("avx2,fma")))
+static inline float sum_l2(DistanceLanes acc)
+{
+    __m256 total = _mm256_add_ps(_mm256_add_ps(acc.a, acc.b), _mm256_add_ps(acc.c, acc.d));
     __m128 lanes = _mm_add_ps(_mm256_castps256_ps128(total), _mm256_extractf128_ps(total, 1));
     lanes = _mm_add_ps(lanes, _mm_movehl_ps(lanes, lanes));
     return _mm_cvtss_f32(_mm_add_ss(lanes, _mm_shuffle_ps(lanes, lanes, 1)));
 }
+
+__attribute__((target("avx2,fma")))
+static inline float estimate_squared_l2(const float *row, const float *query, Py_ssize_t dimension)
+{
+    __m256 zero = _mm256_setzero_ps();
+    DistanceLanes acc = {zero, zero, zero, zero};
+    return sum_l2(accumulate_l2(row, query, 0, dimension, acc));
+}
+
+__attribute__((target("avx2,fma")))
+static inline float estimate_128(const float *row, const float *query, Py_ssize_t dimension)
+{
+    return estimate_squared_l2(row, query, 128);
+}
 #endif
 
 static double (*compute_squared_l2)(const float *, const float *, Py_ssize_t) = squared_l2;
-static float (*estimate_l2)(const float *, const float *, Py_ssize_t);
+typedef float (*EstimateL2)(const float *, const float *, Py_ssize_t);
+static int use_fma;
 
 static double precise_l2(const float *row, const float *query, Py_ssize_t dimension)
 {
@@ -434,13 +456,14 @@ static float screening_threshold(double distance, Py_ssize_t dimension, int desc
                               : squared * (1.0 + relative) + absolute);
 }
 
-static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const float *query,
-                        const uint32_t *slots, Py_ssize_t begin, Py_ssize_t count,
-                        int descending, int precise)
+__attribute__((always_inline))
+static inline int collect_hits_core(Hit *heap, Py_ssize_t limit, const Scan *scan, const float *query,
+                                    const uint32_t *slots, Py_ssize_t begin, Py_ssize_t count,
+                                    int descending, int precise, EstimateL2 estimate)
 {
     Py_ssize_t dimension = scan->dimension;
     double tolerance = (dimension + 8.0) * (4.0 * DBL_EPSILON);
-    int screen = estimate_l2 != NULL && dimension >= 64 && dimension <= 4096 &&
+    int screen = estimate != NULL && dimension >= 64 && dimension <= 4096 &&
                  dimension % 32 == 0 && limit < count;
     float threshold = 0.0f;
     for (Py_ssize_t i = 0; i < count; ++i) {
@@ -449,8 +472,8 @@ static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const flo
             return -1;
         const float *vector = scan->data[slot];
         if (screen && i >= limit) {
-            float estimate = estimate_l2(vector, query, dimension);
-            if (isfinite(estimate) && (descending ? estimate < threshold : estimate > threshold))
+            float squared = estimate(vector, query, dimension);
+            if (isfinite(squared) && (descending ? squared < threshold : squared > threshold))
                 continue;
         }
         double distance = precise ? precise_l2(vector, query, dimension)
@@ -484,6 +507,31 @@ static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const flo
             return 1;
     }
     return 0;
+}
+
+#ifdef HAVE_AVX2
+__attribute__((target("avx2,fma")))
+static int collect_fma_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const float *query,
+                            const uint32_t *slots, Py_ssize_t begin, Py_ssize_t count,
+                            int descending, int precise)
+{
+    if (scan->dimension == 128)
+        return collect_hits_core(heap, limit, scan, query, slots, begin, count, descending,
+                                 precise, estimate_128);
+    return collect_hits_core(heap, limit, scan, query, slots, begin, count, descending,
+                             precise, estimate_squared_l2);
+}
+#endif
+
+static int collect_hits(Hit *heap, Py_ssize_t limit, const Scan *scan, const float *query,
+                        const uint32_t *slots, Py_ssize_t begin, Py_ssize_t count,
+                        int descending, int precise)
+{
+#ifdef HAVE_AVX2
+    if (use_fma)
+        return collect_fma_hits(heap, limit, scan, query, slots, begin, count, descending, precise);
+#endif
+    return collect_hits_core(heap, limit, scan, query, slots, begin, count, descending, precise, NULL);
 }
 
 #ifdef __linux__
@@ -696,8 +744,7 @@ PyMODINIT_FUNC PyInit__mvdb_native(void)
 #ifdef HAVE_AVX2
     if (__builtin_cpu_supports("avx2"))
         compute_squared_l2 = squared_l2_avx2;
-    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
-        estimate_l2 = estimate_squared_l2;
+    use_fma = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
 #endif
 #ifdef __linux__
     parallel_allowed = cpu_budget_allows_parallel();

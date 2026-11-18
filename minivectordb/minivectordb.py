@@ -104,10 +104,10 @@ _INSERT_VALUES = re.compile(
     r"[ \t\r\n]+VALUES?[ \t\r\n]*(?=\()", re.IGNORECASE | re.ASCII
 )
 _QUOTED_LITERAL = r"""('[^'\\]*'|"[^"\\]*")"""
-_DISTANCE_LITERAL = re.compile(
+_DISTANCE_HEAD = re.compile(
     r"""[ \t\r\n]*SELECT[ \t\r\n]+[^'"#;/\\\x60-]*\bL2_DISTANCE[ \t\r\n]*\( """
     r"""[ \t\r\n]*[A-Za-z_][A-Za-z0-9_$]*[ \t\r\n]*,[ \t\r\n]*"""
-    r"""('\[[^'\\]*\]'(?!')|"\[[^"\\]*\]"(?!"))""",
+    r"""(['"])\[""",
     re.IGNORECASE | re.ASCII | re.VERBOSE,
 )
 _DISTANCE_PARAMETER = object()
@@ -675,6 +675,7 @@ class Table:
         self._scan = None
         self._groups: dict[int, dict[Any, int | array.array] | None] = {}
         self._insert_pattern = None
+        self._vector_plans = {}
         self.native_schema = tuple(
             0 if column.type == "BIGINT" else column.size if column.type == "VECTOR" else -column.size
             for column in columns
@@ -730,6 +731,62 @@ class Table:
         return None
 
     # -- vector cache -------------------------------------------------
+    def vector_plan(self, stmt):
+        key = id(stmt)
+        if key not in self._vector_plans:
+            if len(self._vector_plans) >= 32:
+                self._vector_plans.pop(next(iter(self._vector_plans)))
+            # Retain the template alongside the plan so the key cannot be reused.
+            self._vector_plans[key] = (stmt, self._compile_vector_plan(stmt))
+        return self._vector_plans[key][1]
+
+    def _compile_vector_plan(self, stmt):
+        order = stmt["order"]
+        limit = stmt["limit"]
+        if self.vec_idx < 0 or not limit or limit < 0 or len(order) != 1:
+            return None
+        aliases, by_alias, outputs = [], {}, []
+        try:
+            for item in stmt["items"]:
+                expr = item["expr"]
+                if expr[0] == "column":
+                    index = self.column_index(expr[1])
+                    label = expr[1]
+                elif (expr[0] == "l2" and expr[2] is _DISTANCE_PARAMETER and
+                      self.column_index(expr[1]) == self.vec_idx):
+                    index = -1
+                    label = f"L2_DISTANCE({expr[1]})"
+                else:
+                    return None
+                alias = item["alias"] if item["alias"] is not None else label
+                aliases.append(alias)
+                by_alias[alias] = expr
+                outputs.append(index)
+
+            distance = order[0]["expr"]
+            if distance[0] == "column":
+                distance = by_alias.get(distance[1], distance)
+            if (distance[0] != "l2" or distance[2] is not _DISTANCE_PARAMETER or
+                    self.column_index(distance[1]) != self.vec_idx):
+                return None
+            condition = stmt["where"]
+            equality = None
+            if condition is not None:
+                if condition[:2] != ("cmp", "="):
+                    return None
+                left, right = condition[2:]
+                if left[0] == "literal":
+                    left, right = right, left
+                if left[0] != "column" or right[0] != "literal":
+                    return None
+                index = self.column_index(left[1])
+                if index == self.vec_idx:
+                    return None
+                equality = index, right[1]
+        except DBError:
+            return None
+        return aliases, outputs, limit, order[0]["desc"], equality
+
     def vector_scan(self):
         if self._cache_pks is None:
             self._cache_pks = sorted(self.rows)
@@ -1046,12 +1103,22 @@ class Database:
                                                    int(value) if column.type == "BIGINT" else value[1:-1])
                               for column, value in zip(table.columns, row)] for row in rows)
                     return self._insert_rows(table, typed)
-        if match := _DISTANCE_LITERAL.match(sql):
-            start, end = match.span(1)
-            if start + len(sql) - end <= 512:
+        if match := _DISTANCE_HEAD.match(sql):
+            start = match.start(1)
+            quote = match[1]
+            close = sql.find(quote, match.end())
+            end = close + 1
+            if (close > start and sql[close - 1] == "]" and
+                    start + len(sql) - end <= 512 and
+                    not sql.startswith(quote, end) and sql.find("\\", start, close) < 0):
                 template = distance_select_template(sql[:start], sql[end:])
                 if template is not None:
-                    return self.select(template, search_mode, sql[start + 1:end - 1])
+                    literal = sql[start + 1:close]
+                    if _mvdb_native is not None:
+                        table = self.tables.get(template["table"])
+                        if table is not None and (plan := table.vector_plan(template)) is not None:
+                            return self._execute_vector_plan(table, plan, literal)
+                    return self.select(template, search_mode, literal)
         statement = Parser(tokenize(sql)).parse()
         kind = statement["type"]
         if kind == "begin":
@@ -1323,6 +1390,24 @@ class Database:
         return {"affected_rows": len(pks)}
 
     # -- SELECT -------------------------------------------------------
+    def _execute_vector_plan(self, table: Table, plan, literal):
+        aliases, outputs, limit, desc, equality = plan
+        pks, scan = table.vector_scan()
+        target = parse_vector_literal(literal, table.columns[table.vec_idx].size)
+        if scan is None:
+            return {"columns": aliases, "rows": []}
+        candidates = None if equality is None else table.equal_slots(pks, *equality)
+        hits = _mvdb_native.topk(scan, target, candidates, min(limit, len(pks)), desc)
+        if outputs == [table.pk_idx, -1]:
+            rows = [[pks[slot], distance] for slot, distance in hits]
+        else:
+            rows = []
+            for slot, distance in hits:
+                row = table.rows[pks[slot]]
+                rows.append([distance if column == -1 else self._json_value(row[column])
+                             for column in outputs])
+        return {"columns": aliases, "rows": rows}
+
     def select(self, stmt: dict[str, Any], search_mode: str, distance_literal=None) -> dict[str, Any]:
         if stmt["table"] is None:
             return self._select_constants(stmt)

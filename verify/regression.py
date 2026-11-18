@@ -98,6 +98,28 @@ def check_partition_merge(session):
           flush=True)
 
 
+def check_plan_rebinding(session):
+    statement = ("SELECT note, L2_DISTANCE(v,'[0,0]') AS score, id FROM plans "
+                 "WHERE 'keep'=note ORDER BY score LIMIT 2")
+    sql(session, "CREATE TABLE plans(id BIGINT PRIMARY KEY,note VARCHAR(20),v VECTOR(2))")
+    sql(session, "INSERT INTO plans VALUES (8,'keep','[3,0]'),(2,'keep','[0,1]'),(1,'skip','[0,0]')")
+    assert sql(session, statement) == [["keep", 1.0, 2], ["keep", 3.0, 8]]
+    assert sql(session, statement.replace("[0,0]", "[3,0]")) == [
+        ["keep", 0.0, 8], ["keep", math.sqrt(10), 2],
+    ]
+    assert sql(session, statement.replace("'keep'=note", "'keep'=note AND id>=8")) == [
+        ["keep", 3.0, 8],
+    ]
+    sql(session, "DROP TABLE plans")
+    sql(session, "CREATE TABLE plans(v VECTOR(2),id BIGINT PRIMARY KEY,note VARCHAR(20))")
+    assert sql(session, statement) == []
+    sql(session, "INSERT INTO plans VALUES ('[4,0]',9,'keep'),('[0,5]',3,'keep')")
+    rows = sql(session, statement)
+    assert rows == [["keep", 4.0, 9], ["keep", 5.0, 3]], rows
+    print("TopK plan target rebinding, projection order, predicate fallback and DROP/CREATE: PASS",
+          flush=True)
+
+
 def run(candidate, legacy, root):
     session = Session(CONFIG, root / "stderr.log", image=legacy or candidate, data_root=root)
     try:
@@ -145,6 +167,7 @@ def run(candidate, legacy, root):
         check_insert_paths(session)
         check_near_cutoff(session)
         check_partition_merge(session)
+        check_plan_rebinding(session)
 
         sql(session, "BEGIN")
         sql(session, "UPDATE t SET grp='排除' WHERE id=3")

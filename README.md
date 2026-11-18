@@ -100,20 +100,23 @@ python3 protocol_check/run.py --image minivectordb:latest --output protocol-resu
 - Linux 上的大候选集可分两段并行扫描。每段按同一个距离和主键规则保留局部 TopK，合并后再取全局 TopK。单核配额、小候选集和较大的 K 使用单线程路径。可通过 `MVDB_SCAN_THREADS=1` 关闭并行以做对照。
 - 事务内的写入、回滚及其他行变动会使候选缓存失效。ANN 模式复用精确扫描，`CREATE VECTOR INDEX` 的元数据随事务日志和检查点保存。
 - 简单的批量 `INSERT ... VALUES` 由 C 扩展直接解码有类型的行。通用解析器仍处理转义和显式列清单等形式，所有路径复用主键检查、语句原子性和 WAL 提交。重复的距离查询可复用语法模板，每次请求绑定自己的向量参数。
+- 常用 TopK 模板在表对象内缓存已解析的列位置、投影和等值过滤。每条请求重新绑定向量和筛出当前可见候选。128 维筛选循环使用编译期固定宽度，沿用同一个保守误差界与精确复算路径。
 
 ## 6. 附加验证
 
-在 Linux 上运行以下命令。`mvdb-baseline` 是上一版性能提交 `a39ba49` 的镜像，`minivectordb:latest` 是本版镜像。测试旧 JSON 格式迁移时使用 `0b1db0d` 的镜像。
+在 Linux 上运行以下命令。`mvdb-baseline` 是上一版性能提交 `1e4414f` 的镜像，`minivectordb:latest` 是本版镜像。测试旧 JSON 格式迁移时使用 `0b1db0d` 的镜像。
 
 ```bash
 python3 verify/regression.py minivectordb:latest --legacy mvdb-baseline
-python3 verify/benchmark.py mvdb-baseline minivectordb:latest --rounds 3 --protocol-probe 100
+python3 verify/benchmark.py mvdb-baseline minivectordb:latest --rounds 5 --protocol-probe 100
 python3 verify/benchmark.py minivectordb:latest --rounds 1 --seed 91 --shuffle-keys --exponential --oracle-queries 1000
+docker run --rm --network none --cpus=2 --entrypoint python -v "$PWD:/project:ro" \
+    minivectordb:latest /project/verify/pipe_benchmark.py
 ```
 
 基准生成 10,000 条 128 维向量，每批写入 100 条，执行 1,000 次 TopK 查询，其中一半带等值过滤。脚本检查所有返回行的数量、排序、唯一性、过滤条件及距离，默认对 40 个查询独立全量计算真值，并检查重启后的向量值。输出包括有过滤和无过滤两组延迟、端到端用时、容器 CPU 时间、峰值内存、设备 I/O 和数据文件大小。
 
-本地 WSL2 Linux 容器通过官方握手和 20/20 个公开用例。`a39ba49` 和本版交错测量的三轮中位数为写入 0.251 s → 0.201 s、查询 0.442 s → 0.436 s、查询阶段峰值内存 21.07 MiB → 21.31 MiB。另一组乱序主键和科学计数法输入通过了 1,000 个查询的独立全量真值校验。赛题的正式 E 以平台测量为准。
+本地 WSL2 Linux 容器通过官方握手和 20/20 个公开用例。`1e4414f` 和本版交错测量的五轮中位数为 1,000 次查询 0.413 s → 0.388 s，查询容器 CPU 时间 0.167 s → 0.139 s，峰值内存 21.09 MiB → 21.29 MiB。容器内直连子进程的 JSONL 测试保留完整请求与响应，去掉外部 Docker 转发层，在这一口径下整批查询约快 10%。赛题的正式 E 以平台测量为准。
 
 ## 7. 已知限制
 
